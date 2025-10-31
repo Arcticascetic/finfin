@@ -90,10 +90,19 @@ class _BudgetAppState extends State<BudgetApp> {
       _incomeCategories = incomeStrings ?? defaultIncomeCategories;
 
       if (transactionStrings != null) {
+        // --- FIX for Problem 1: Handle Corrupted Data ---
         _transactions = transactionStrings.map((jsonString) {
-          final jsonMap = json.decode(jsonString) as Map<String, dynamic>;
-          return Transaction.fromJson(jsonMap);
-        }).toList();
+          try {
+            // Try to parse the transaction
+            final jsonMap = json.decode(jsonString) as Map<String, dynamic>;
+            return Transaction.fromJson(jsonMap);
+          } catch (e) {
+            // If it fails (corrupted data, old format, etc.), log it and skip.
+            print('Failed to load transaction: $jsonString. Error: $e');
+            return null; // Return null for the bad entry
+          }
+        }).whereType<Transaction>().toList(); // Filters out all the null (bad) entries
+        // --- End of FIX ---
       }
       _isLoading = false;
     });
@@ -209,11 +218,9 @@ class _BudgetAppState extends State<BudgetApp> {
           seedColor: primaryBlue,
           brightness: Brightness.dark,
         ).copyWith(
-          background: const Color(0xFF0A192F),
           surface: const Color(0xFF102A43),
           primary: primaryBlue,
         ),
-        useMaterial3: true,
       ),
       themeMode: _themeMode,
       home: DefaultTabController(
@@ -242,11 +249,11 @@ class _BudgetAppState extends State<BudgetApp> {
                     // --- Tab 1: Home Screen ---
                     HomeScreen(
                       transactions: _filteredTransactions,
-                      allTransactions: _transactions, // Pass all for context
+                      allTransactions: _transactions, 
                       currencySymbol: _currencySymbol,
                       filterRange: _filterRange,
-                      expenseCategories: _expenseCategories, // NEW
-                      incomeCategories: _incomeCategories,   // NEW
+                      expenseCategories: _expenseCategories,
+                      incomeCategories: _incomeCategories,
                       onAddTransaction: _addTransaction,
                       onRemoveTransaction: _removeTransaction,
                       onUpdateFilter: _updateFilterRange,
@@ -271,11 +278,12 @@ class _BudgetAppState extends State<BudgetApp> {
         return SettingsSheet(
           themeMode: _themeMode,
           currencySymbol: _currencySymbol,
-          expenseCategories: _expenseCategories, // NEW
-          incomeCategories: _incomeCategories,   // NEW
+          expenseCategories: _expenseCategories, 
+          incomeCategories: _incomeCategories,
+          allTransactions: _transactions, // Pass the full list for checking
           onUpdateTheme: _updateThemeMode,
           onUpdateCurrency: _updateCurrency,
-          onUpdateCategories: _updateCategories, // NEW
+          onUpdateCategories: _updateCategories, 
         );
       },
     );
@@ -286,7 +294,7 @@ class _BudgetAppState extends State<BudgetApp> {
 class Transaction {
   final double amount;
   final String type; // 'income' or 'expense'
-  final String category; // New field
+  final String category;
   final DateTime date;
 
   Transaction(
@@ -302,18 +310,28 @@ class Transaction {
         'date': date.toIso8601String(),
       };
 
-  factory Transaction.fromJson(Map<String, dynamic> json) => Transaction(
-        amount: json['amount'] as double,
-        type: json['type'] as String,
-        category: json['category'] as String,
-        date: DateTime.parse(json['date'] as String),
-      );
+  factory Transaction.fromJson(Map<String, dynamic> json) {
+    // Add checks to ensure data integrity
+    if (json['amount'] == null ||
+        json['type'] == null ||
+        json['category'] == null ||
+        json['date'] == null) {
+      throw const FormatException("Missing required field in transaction JSON");
+    }
+    
+    return Transaction(
+      amount: (json['amount'] as num).toDouble(), // Safer parsing
+      type: json['type'] as String,
+      category: json['category'] as String,
+      date: DateTime.parse(json['date'] as String),
+    );
+  }
 }
 
 // --- Category Selection Screen ---
 class CategorySelectionScreen extends StatelessWidget {
   final String type; // 'income' or 'expense'
-  final List<String> categories; // NEW: Receives the dynamic list
+  final List<String> categories;
   final Function(double, String, String) onConfirmTransaction;
 
   const CategorySelectionScreen(
@@ -357,7 +375,7 @@ class CategorySelectionScreen extends StatelessWidget {
                     if (context.mounted) Navigator.of(context).pop();
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+                    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
                     foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
                     elevation: 4,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -380,8 +398,8 @@ class HomeScreen extends StatelessWidget {
   final List<Transaction> allTransactions;
   final String currencySymbol;
   final DateTimeRange? filterRange;
-  final List<String> expenseCategories; // NEW
-  final List<String> incomeCategories;   // NEW
+  final List<String> expenseCategories;
+  final List<String> incomeCategories;
   final Function(double, String, String) onAddTransaction;
   final Function(Transaction) onRemoveTransaction;
   final Function(DateTimeRange?) onUpdateFilter;
@@ -463,7 +481,7 @@ class HomeScreen extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
           child: Card(
-            color: Theme.of(context).colorScheme.surfaceVariant,
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
             elevation: 4,
             child: Padding(
               padding: const EdgeInsets.all(20.0),
@@ -564,7 +582,7 @@ class HomeScreen extends StatelessWidget {
                       MaterialPageRoute(
                         builder: (ctx) => CategorySelectionScreen(
                           type: 'income',
-                          categories: incomeCategories, // PASSED DYNAMIC LIST
+                          categories: incomeCategories,
                           onConfirmTransaction: onAddTransaction,
                         ),
                       ),
@@ -587,7 +605,7 @@ class HomeScreen extends StatelessWidget {
                       MaterialPageRoute(
                         builder: (ctx) => CategorySelectionScreen(
                           type: 'expense',
-                          categories: expenseCategories, // PASSED DYNAMIC LIST
+                          categories: expenseCategories,
                           onConfirmTransaction: onAddTransaction,
                         ),
                       ),
@@ -610,7 +628,7 @@ class HomeScreen extends StatelessWidget {
   }
 }
 
-// --- ChartScreen with Pie Chart (No changes needed) ---
+// --- ChartScreen with Pie Chart (No changes) ---
 class ChartScreen extends StatelessWidget {
   final List<Transaction> transactions;
   final String currencySymbol;
@@ -734,7 +752,7 @@ class ChartScreen extends StatelessWidget {
           data.key,
           style: TextStyle(
               fontWeight: FontWeight.bold,
-              color: Theme.of(context).colorScheme.onBackground),
+              color: Theme.of(context).colorScheme.onSurface),
         ),
         badgePositionPercentageOffset: 1.05,
       );
@@ -745,7 +763,7 @@ class ChartScreen extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
       ),
       child: PieChart(
         PieChartData(
@@ -765,7 +783,7 @@ class ChartScreen extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
       ),
       child: LineChart(
         LineChartData(
@@ -819,7 +837,7 @@ class ChartScreen extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
       ),
       child: BarChart(
         BarChartData(
@@ -846,7 +864,7 @@ class ChartScreen extends StatelessWidget {
               ),
             ),
             topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles:false)),
             bottomTitles: AxisTitles(
               sideTitles: SideTitles(
                 showTitles: true,
@@ -893,11 +911,12 @@ class ChartScreen extends StatelessWidget {
 class SettingsSheet extends StatelessWidget {
   final ThemeMode themeMode;
   final String currencySymbol;
-  final List<String> expenseCategories; // NEW
-  final List<String> incomeCategories;   // NEW
+  final List<String> expenseCategories;
+  final List<String> incomeCategories;
+  final List<Transaction> allTransactions; // NEW: Pass transactions for checking
   final Function(ThemeMode) onUpdateTheme;
   final Function(String) onUpdateCurrency;
-  final Function(String, List<String>) onUpdateCategories; // NEW
+  final Function(String, List<String>) onUpdateCategories;
 
   const SettingsSheet({
     super.key,
@@ -905,6 +924,7 @@ class SettingsSheet extends StatelessWidget {
     required this.currencySymbol,
     required this.expenseCategories,
     required this.incomeCategories,
+    required this.allTransactions,
     required this.onUpdateTheme,
     required this.onUpdateCurrency,
     required this.onUpdateCategories,
@@ -975,6 +995,7 @@ class SettingsSheet extends StatelessWidget {
             title: 'Expense Categories',
             type: 'expense',
             categories: expenseCategories,
+            allTransactions: allTransactions, // Pass list
             onUpdate: onUpdateCategories,
           ),
           const SizedBox(height: 30),
@@ -982,6 +1003,7 @@ class SettingsSheet extends StatelessWidget {
             title: 'Income Categories',
             type: 'income',
             categories: incomeCategories,
+            allTransactions: allTransactions, // Pass list
             onUpdate: onUpdateCategories,
           ),
         ],
@@ -990,11 +1012,12 @@ class SettingsSheet extends StatelessWidget {
   }
 }
 
-// --- NEW Category Editor Widget ---
+// --- Category Editor Widget ---
 class CategoryEditor extends StatefulWidget {
   final String title;
   final String type; // 'income' or 'expense'
   final List<String> categories;
+  final List<Transaction> allTransactions; // NEW: Receive full list
   final Function(String, List<String>) onUpdate;
 
   const CategoryEditor({
@@ -1002,6 +1025,7 @@ class CategoryEditor extends StatefulWidget {
     required this.title,
     required this.type,
     required this.categories,
+    required this.allTransactions,
     required this.onUpdate,
   });
 
@@ -1016,11 +1040,9 @@ class _CategoryEditorState extends State<CategoryEditor> {
   @override
   void initState() {
     super.initState();
-    // Work with a copy of the list until save
     _localCategories = List.from(widget.categories);
   }
   
-  // Update local copy if the parent widget passes a new list
   @override
   void didUpdateWidget(covariant CategoryEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -1032,19 +1054,42 @@ class _CategoryEditorState extends State<CategoryEditor> {
   void _addCategory() {
     final newCategory = _controller.text.trim();
     if (newCategory.isNotEmpty && !_localCategories.contains(newCategory)) {
-      setState(() {
-        _localCategories.add(newCategory);
-        _controller.clear();
-        widget.onUpdate(widget.type, _localCategories);
-      });
+      _localCategories.add(newCategory);
+      _controller.clear();
+      // No setState() needed, parent update will rebuild
+      widget.onUpdate(widget.type, _localCategories); 
     }
   }
 
   void _removeCategory(String category) {
-    setState(() {
+    // --- FIX for Problem 3: Check if category is in use ---
+    final isCategoryInUse = widget.allTransactions.any(
+      (txn) => txn.category == category && txn.type == widget.type
+    );
+
+    if (isCategoryInUse) {
+      // If in use, show an alert and do NOT delete
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Category in Use'),
+          content: Text(
+              'The category "$category" cannot be deleted because it is used by existing transactions.'),
+          actions: [
+            TextButton(
+              child: const Text('OK'),
+              onPressed: () => Navigator.of(ctx).pop(),
+            ),
+          ],
+        ),
+      );
+    } else {
+      // If not in use, proceed with deletion
       _localCategories.remove(category);
+      // No setState() needed, parent update will rebuild
       widget.onUpdate(widget.type, _localCategories);
-    });
+    }
+    // --- End of FIX ---
   }
 
   @override
@@ -1139,7 +1184,7 @@ class ClickwheelInputScreen extends StatefulWidget {
 
 class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   int _currentDigit = 0;
-  List<int> _inputDigits = [];
+  final List<int> _inputDigits = [];
   Timer? _digitConfirmationTimer;
   bool _isTimerActive = false;
   double _currentValue = 0.0;
@@ -1233,7 +1278,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              '${_currentValue.toStringAsFixed(2)}',
+              _currentValue.toStringAsFixed(2),
               style: Theme.of(context).textTheme.displaySmall?.copyWith(
                     fontWeight: FontWeight.bold,
                     color: Theme.of(context).colorScheme.primary,
@@ -1245,7 +1290,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
               height: 200,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Theme.of(context).colorScheme.surfaceVariant,
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withOpacity(0.2),
@@ -1316,3 +1361,5 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     );
   }
 }
+
+
