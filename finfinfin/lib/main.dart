@@ -22,6 +22,10 @@ const List<String> defaultIncomeCategories = [
 ];
 
 // Helper to determine the start and end of the current month
+/// Returns a [DateTimeRange] that covers the current calendar month.
+///
+/// Start: first day of the current month at midnight.
+/// End: last day of the current month (calculated by using month+1, day 0).
 DateTimeRange getThisMonthRange() {
   final now = DateTime.now();
   final firstDay = DateTime(now.year, now.month, 1);
@@ -30,6 +34,10 @@ DateTimeRange getThisMonthRange() {
 }
 
 // Helper to determine the start and end of the last month
+/// Returns a [DateTimeRange] that covers the previous calendar month.
+///
+/// Start: first day of the previous month.
+/// End: last day of the previous month.
 DateTimeRange getLastMonthRange() {
   final now = DateTime.now();
   final firstDayOfCurrentMonth = DateTime(now.year, now.month, 1);
@@ -39,6 +47,11 @@ DateTimeRange getLastMonthRange() {
 }
 
 // --- Main App Widget (Manages Global State: Theme, Currency, and Filter) ---
+/// Root widget for the application.
+///
+/// Manages top-level state via [_BudgetAppState], including theme mode,
+/// currency symbol, stored categories and transactions. This widget
+/// simply creates the state container — all app logic lives in the state.
 class BudgetApp extends StatefulWidget {
   const BudgetApp({super.key});
 
@@ -66,8 +79,16 @@ class _BudgetAppState extends State<BudgetApp> {
     _loadSettingsAndData();
   }
 
-  // --- Persistence & Initialization ---
+  /// Called when this State object is first created.
+  ///
+  /// Kicks off loading persisted settings and transactions from
+  /// SharedPreferences so the UI can be populated.
 
+  // --- Persistence & Initialization ---
+  /// Load persisted settings (theme, currency, categories) and transactions.
+  ///
+  /// Reads from `SharedPreferences`. If transaction data is corrupted
+  /// it will skip invalid entries and continue loading valid ones.
   Future<void> _loadSettingsAndData() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -109,6 +130,9 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   Future<void> _saveTransactions() async {
+  /// Persist the current transactions list to `SharedPreferences`.
+  ///
+  /// Serializes each `Transaction` to JSON before saving.
     final prefs = await SharedPreferences.getInstance();
     final transactionStrings = _transactions.map((transaction) {
       final jsonMap = transaction.toJson();
@@ -118,12 +142,17 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   Future<void> _saveCategories() async {
+  /// Persist current category lists (expense and income) to storage.
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('expenseCategories', _expenseCategories);
     await prefs.setStringList('incomeCategories', _incomeCategories);
   }
 
   Future<void> _saveSettings({String? currency, ThemeMode? mode}) async {
+  /// Save lightweight app settings such as currency symbol and theme mode.
+  ///
+  /// Only writes values that are provided (non-null) to avoid overwriting
+  /// other settings unintentionally.
     final prefs = await SharedPreferences.getInstance();
     if (currency != null) {
       await prefs.setString('currencySymbol', currency);
@@ -136,6 +165,11 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- App Logic Methods ---
 
   void _addTransaction(double amount, String type, String category) {
+  /// Add a new transaction to the in-memory list and persist it.
+  ///
+  /// - `amount`: positive numeric value (double)
+  /// - `type`: either 'income' or 'expense'
+  /// - `category`: one of the configured categories
     setState(() {
       _transactions.add(Transaction(
           amount: amount,
@@ -148,6 +182,7 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _removeTransaction(Transaction transactionToRemove) {
+  /// Remove a transaction from memory and persist the updated list.
     setState(() {
       _transactions.remove(transactionToRemove);
     });
@@ -155,6 +190,7 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _updateThemeMode(ThemeMode newMode) {
+  /// Update the app's theme mode and persist the selection.
     setState(() {
       _themeMode = newMode;
     });
@@ -162,6 +198,7 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _updateCurrency(String newCurrency) {
+  /// Update the displayed currency symbol and save to preferences.
     setState(() {
       _currencySymbol = newCurrency;
     });
@@ -169,12 +206,16 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _updateFilterRange(DateTimeRange? newRange) {
+  /// Update the currently applied date filter range used by the UI.
     setState(() {
       _filterRange = newRange;
     });
   }
 
   void _updateCategories(String type, List<String> newCategories) {
+  /// Update category lists (expense or income) and save immediately.
+  ///
+  /// `type` must be either 'expense' or 'income'.
     setState(() {
       if (type == 'expense') {
         _expenseCategories = newCategories;
@@ -188,6 +229,7 @@ class _BudgetAppState extends State<BudgetApp> {
 
   // Filtered List Getter
   List<Transaction> get _filteredTransactions {
+    // Return all transactions when no range filter is set.
     if (_filterRange == null) {
       return _transactions;
     }
@@ -202,6 +244,10 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- Build Method ---
   @override
   Widget build(BuildContext context) {
+    /// Build the root [MaterialApp] and wire up top-level routes/tabs.
+    ///
+    /// This method constructs themes, tabs and passes callbacks to child
+    /// widgets so they can mutate top-level state via provided functions.
     const Color primaryBlue = Color(0xFF00BCD4);
 
     return MaterialApp(
@@ -218,9 +264,11 @@ class _BudgetAppState extends State<BudgetApp> {
           seedColor: primaryBlue,
           brightness: Brightness.dark,
         ).copyWith(
+          background: const Color(0xFF0A192F),
           surface: const Color(0xFF102A43),
           primary: primaryBlue,
         ),
+        useMaterial3: true,
       ),
       themeMode: _themeMode,
       home: DefaultTabController(
@@ -291,18 +339,27 @@ class _BudgetAppState extends State<BudgetApp> {
 }
 
 // --- Transaction Data Model ---
+/// Immutable data model that represents a single financial transaction.
+///
+/// Fields:
+/// - [amount]: numeric transaction amount (double).
+/// - [type]: 'income' or 'expense'.
+/// - [category]: user-defined category string.
+/// - [date]: timestamp of the transaction.
 class Transaction {
   final double amount;
   final String type; // 'income' or 'expense'
   final String category;
   final DateTime date;
 
+  /// Create a [Transaction] from given values.
   Transaction(
-      {required this.amount,
-      required this.type,
-      required this.category,
-      required this.date});
+    {required this.amount,
+    required this.type,
+    required this.category,
+    required this.date});
 
+  /// Serialize this [Transaction] to a JSON-compatible map.
   Map<String, dynamic> toJson() => {
         'amount': amount,
         'type': type,
@@ -310,6 +367,11 @@ class Transaction {
         'date': date.toIso8601String(),
       };
 
+  /// Create a [Transaction] from a decoded JSON map.
+  ///
+  /// Performs defensive checks and converts numeric values safely into
+  /// `double` using `toDouble()` so both `int` and `double` JSON values
+  /// are handled.
   factory Transaction.fromJson(Map<String, dynamic> json) {
     // Add checks to ensure data integrity
     if (json['amount'] == null ||
@@ -338,6 +400,11 @@ class CategorySelectionScreen extends StatelessWidget {
       {super.key, required this.type, required this.categories, required this.onConfirmTransaction});
 
   @override
+  /// Build the category selection UI.
+  ///
+  /// Presents available categories in a grid. When a category is selected
+  /// it navigates to the amount input screen and calls `onConfirmTransaction`
+  /// with the entered amount, selected type and category.
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -375,7 +442,7 @@ class CategorySelectionScreen extends StatelessWidget {
                     if (context.mounted) Navigator.of(context).pop();
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
                     foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
                     elevation: 4,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -418,14 +485,21 @@ class HomeScreen extends StatelessWidget {
   });
 
   String get _filterText {
-    if (filterRange == null) return 'All Time';
-    final start = DateFormat('MMM d, y').format(filterRange!.start);
-    final end = DateFormat('MMM d, y').format(filterRange!.end);
-    return '$start - $end';
+  /// Human-readable label for the currently applied date filter.
+  ///
+  /// Returns 'All Time' when no filter is set, otherwise formats the
+  /// start and end dates using `intl` for display in the UI.
+  if (filterRange == null) return 'All Time';
+  final start = DateFormat('MMM d, y').format(filterRange!.start);
+  final end = DateFormat('MMM d, y').format(filterRange!.end);
+  return '$start - $end';
   }
 
   Future<void> _pickDateRange(BuildContext context) async {
-    final DateTimeRange? newRange = await showDateRangePicker(
+  /// Show a modal date-range picker and call the parent callback with the
+  /// chosen range (or null if cancelled). The picker bounds are computed
+  /// relative to available transaction history.
+  final DateTimeRange? newRange = await showDateRangePicker(
       context: context,
       firstDate: allTransactions.isNotEmpty
           ? allTransactions.first.date.subtract(const Duration(days: 30))
@@ -481,7 +555,7 @@ class HomeScreen extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
           child: Card(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            color: Theme.of(context).colorScheme.surfaceVariant,
             elevation: 4,
             child: Padding(
               padding: const EdgeInsets.all(20.0),
@@ -636,6 +710,11 @@ class ChartScreen extends StatelessWidget {
 
   // Helper to generate data for the wealth line chart
   List<FlSpot> _getWealthData() {
+  /// Generate a running wealth series from the transaction list.
+  ///
+  /// Returns an ordered list of [FlSpot] points where the x-axis is the
+  /// transaction index and the y-axis is the running balance after that
+  /// transaction (income adds, expense subtracts).
     final List<FlSpot> data = [];
     double runningTotal = 0.0;
 
@@ -655,6 +734,7 @@ class ChartScreen extends StatelessWidget {
 
   // Helper to calculate total expenses by category
   Map<String, double> getExpenseCategoryTotals(List<Transaction> txns) {
+  /// Aggregate expense totals grouped by category.
     final Map<String, double> totals = {};
     for (var txn in txns.where((t) => t.type == 'expense')) {
       totals.update(txn.category, (value) => value + txn.amount,
@@ -665,6 +745,8 @@ class ChartScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    /// Build chart-related UI: pie, line and bar charts that visualise
+    /// expenses, wealth over time, and income vs expense totals.
     if (transactions.isEmpty) {
       return const Center(
         child: Text(
@@ -683,8 +765,9 @@ class ChartScreen extends StatelessWidget {
         .fold(0.0, (sum, t) => sum + t.amount);
     final expenseCategoryTotals = getExpenseCategoryTotals(transactions);
     final wealthData = _getWealthData();
-    final maxY = wealthData.map((e) => e.y).reduce((a, b) => a > b ? a : b);
-    final minY = wealthData.map((e) => e.y).reduce((a, b) => a < b ? a : b);
+    // Add checks for empty lists before reduce
+    final maxY = wealthData.isEmpty ? 0 : wealthData.map((e) => e.y).reduce((a, b) => a > b ? a : b);
+    final minY = wealthData.isEmpty ? 0 : wealthData.map((e) => e.y).reduce((a, b) => a < b ? a : b);
     final totalMaxY = [totalIncome, totalExpense].reduce((a, b) => a > b ? a : b);
     final totalExpenseAmount = totalExpense;
 
@@ -709,7 +792,7 @@ class ChartScreen extends StatelessWidget {
             style: Theme.of(context).textTheme.headlineSmall,
           ),
           const SizedBox(height: 16),
-          _buildLineChart(context, wealthData, currencySymbol, minY, maxY),
+          _buildLineChart(context, wealthData, currencySymbol, minY.toDouble(), maxY.toDouble()),
           const SizedBox(height: 32),
 
           // --- Bar Chart: Total Income vs Expense ---
@@ -727,6 +810,10 @@ class ChartScreen extends StatelessWidget {
 
   Widget _buildExpensePieChart(BuildContext context,
       Map<String, double> totals, double totalAmount) {
+    /// Build a pie chart widget showing expenses broken down by category.
+    ///
+    /// If there are no expenses in the period, returns a friendly message
+    /// instead of an empty chart.
     if (totalAmount == 0) {
       return const Center(
           child: Padding(
@@ -752,7 +839,7 @@ class ChartScreen extends StatelessWidget {
           data.key,
           style: TextStyle(
               fontWeight: FontWeight.bold,
-              color: Theme.of(context).colorScheme.onSurface),
+              color: Theme.of(context).colorScheme.onBackground),
         ),
         badgePositionPercentageOffset: 1.05,
       );
@@ -763,7 +850,7 @@ class ChartScreen extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
+        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
       ),
       child: PieChart(
         PieChartData(
@@ -778,12 +865,16 @@ class ChartScreen extends StatelessWidget {
 
   Widget _buildLineChart(BuildContext context, List<FlSpot> wealthData,
       String currencySymbol, double minY, double maxY) {
+    /// Build the line chart that shows running wealth over time.
+    ///
+    /// Accepts bounds `minY`/`maxY` and a precomputed list of [FlSpot]
+    /// points. Handles empty datasets gracefully.
     return Container(
       height: 300,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
+        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
       ),
       child: LineChart(
         LineChartData(
@@ -794,7 +885,8 @@ class ChartScreen extends StatelessWidget {
                 showTitles: true,
                 reservedSize: 40,
                 getTitlesWidget: (value, meta) => SideTitleWidget(
-                  axisSide: meta.axisSide,
+                  // axisSide: meta.axisSide, // <--- FIX: REMOVED THIS LINE
+                  meta: meta,
                   child: Text(
                       '$currencySymbol${value.toStringAsFixed(0)}',
                       style: const TextStyle(fontSize: 10)),
@@ -811,10 +903,10 @@ class ChartScreen extends StatelessWidget {
                 color: Theme.of(context).colorScheme.outline.withOpacity(0.5)),
           ),
           minY: minY < 0 ? minY * 1.1 : 0,
-          maxY: maxY * 1.1,
+          maxY: (maxY == 0 && minY == 0) ? 100 : maxY * 1.1, // Handle case where max is 0
           lineBarsData: [
             LineChartBarData(
-              spots: wealthData,
+              spots: wealthData.isEmpty ? [const FlSpot(0, 0)] : wealthData, // Handle empty data
               isCurved: true,
               color: Theme.of(context).colorScheme.primary,
               barWidth: 4,
@@ -832,12 +924,14 @@ class ChartScreen extends StatelessWidget {
 
   Widget _buildBarChart(BuildContext context, double totalIncome,
       double totalExpense, String currencySymbol, double totalMaxY) {
+    /// Build a simple bar chart comparing total income vs total expense
+    /// for the selected period.
     return Container(
       height: 300,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
+        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
       ),
       child: BarChart(
         BarChartData(
@@ -856,7 +950,7 @@ class ChartScreen extends StatelessWidget {
                 showTitles: true,
                 reservedSize: 40,
                 getTitlesWidget: (value, meta) => SideTitleWidget(
-                  axisSide: meta.axisSide,
+                  meta: meta,
                   child: Text(
                       '${value.toStringAsFixed(0)}',
                       style: const TextStyle(fontSize: 10)),
@@ -932,6 +1026,10 @@ class SettingsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    /// Build the settings modal sheet UI.
+    ///
+    /// Exposes theme, currency and category editors; relays updates back
+    /// to the parent via the provided callbacks.
     return SingleChildScrollView(
       padding: EdgeInsets.only(
         top: 20,
@@ -1042,6 +1140,10 @@ class _CategoryEditorState extends State<CategoryEditor> {
     super.initState();
     _localCategories = List.from(widget.categories);
   }
+  /// Initialize local state from widget properties.
+  ///
+  /// Copies the provided category list so edits are staged locally and
+  /// only pushed to parent via `onUpdate` when changes are committed.
   
   @override
   void didUpdateWidget(covariant CategoryEditor oldWidget) {
@@ -1050,6 +1152,8 @@ class _CategoryEditorState extends State<CategoryEditor> {
       _localCategories = List.from(widget.categories);
     }
   }
+  /// Called when the parent widget updates properties; keep the local
+  /// staged copy in sync with newly-provided categories.
 
   void _addCategory() {
     final newCategory = _controller.text.trim();
@@ -1060,6 +1164,9 @@ class _CategoryEditorState extends State<CategoryEditor> {
       widget.onUpdate(widget.type, _localCategories); 
     }
   }
+  /// Add a new category to the local list and notify the parent.
+  ///
+  /// Duplicate names are ignored. The UI is updated by the parent callback.
 
   void _removeCategory(String category) {
     // --- FIX for Problem 3: Check if category is in use ---
@@ -1091,6 +1198,8 @@ class _CategoryEditorState extends State<CategoryEditor> {
     }
     // --- End of FIX ---
   }
+  /// Remove a category after confirming it is not used by any existing
+  /// transactions. If it is in use, shows an alert and aborts deletion.
 
   @override
   Widget build(BuildContext context) {
@@ -1184,7 +1293,7 @@ class ClickwheelInputScreen extends StatefulWidget {
 
 class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   int _currentDigit = 0;
-  final List<int> _inputDigits = [];
+  List<int> _inputDigits = [];
   Timer? _digitConfirmationTimer;
   bool _isTimerActive = false;
   double _currentValue = 0.0;
@@ -1194,12 +1303,14 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     super.initState();
     _startDigitConfirmationTimer();
   }
+  /// Initialize digit entry state and start the confirmation timer.
 
   @override
   void dispose() {
     _digitConfirmationTimer?.cancel();
     super.dispose();
   }
+  /// Cleanup timers when the input screen is disposed.
 
   void _incrementDigit() {
     setState(() {
@@ -1207,6 +1318,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _resetDigitConfirmationTimer();
     });
   }
+  /// Rotate the currently-selected digit up (0-9) and reset the timer.
 
   void _decrementDigit() {
     setState(() {
@@ -1214,6 +1326,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _resetDigitConfirmationTimer();
     });
   }
+  /// Rotate the currently-selected digit down (0-9) and reset the timer.
 
   void _addDigit() {
     setState(() {
@@ -1223,6 +1336,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _resetDigitConfirmationTimer();
     });
   }
+  /// Commit the current digit into the input buffer and recompute value.
 
   void _removeLastDigit() {
     setState(() {
@@ -1236,6 +1350,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       }
     });
   }
+  /// Remove the last committed digit from the input buffer.
 
   void _updateCurrentValue() {
     String numStr = _inputDigits.map((e) => e.toString()).join();
@@ -1245,6 +1360,10 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _currentValue = (int.tryParse(numStr) ?? 0) / 100.0;
     }
   }
+  /// Recalculate the numeric value from the committed digits.
+  ///
+  /// The input Treats the digits as cents (i.e. last two digits are fractional)
+  /// by dividing the parsed integer by 100.
 
   void _startDigitConfirmationTimer() {
     _digitConfirmationTimer?.cancel();
@@ -1256,13 +1375,19 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       }
     });
   }
+  /// Start or restart the 1-second confirmation timer which auto-commits
+  /// the current digit if the user does not change it within the period.
 
   void _resetDigitConfirmationTimer() {
     _startDigitConfirmationTimer();
   }
+  /// Convenience wrapper to restart the confirmation timer.
 
   @override
   Widget build(BuildContext context) {
+    /// Build the clickwheel-like numeric input UI that lets users dial
+    /// digits and commit them. Returns the entered numeric value to the
+    /// caller when 'Done' is pressed.
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
@@ -1278,7 +1403,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              _currentValue.toStringAsFixed(2),
+              '${_currentValue.toStringAsFixed(2)}',
               style: Theme.of(context).textTheme.displaySmall?.copyWith(
                     fontWeight: FontWeight.bold,
                     color: Theme.of(context).colorScheme.primary,
@@ -1290,7 +1415,7 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
               height: 200,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                color: Theme.of(context).colorScheme.surfaceVariant,
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withOpacity(0.2),
