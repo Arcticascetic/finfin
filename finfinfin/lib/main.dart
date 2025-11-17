@@ -154,6 +154,26 @@ class _BudgetAppState extends State<BudgetApp> {
     _saveTransactions();
   }
 
+  /// Edit an existing transaction's amount (keeps type, category, date).
+  void _editTransaction(Transaction oldTransaction, double newAmount) {
+    final idx = _transactions.indexWhere((t) =>
+        t.date == oldTransaction.date &&
+        t.type == oldTransaction.type &&
+        t.category == oldTransaction.category &&
+        t.amount == oldTransaction.amount);
+    if (idx != -1) {
+      setState(() {
+        _transactions[idx] = Transaction(
+          amount: newAmount,
+          type: oldTransaction.type,
+          category: oldTransaction.category,
+          date: oldTransaction.date,
+        );
+      });
+      _saveTransactions();
+    }
+  }
+
   void _updateThemeMode(ThemeMode newMode) {
     setState(() {
       _themeMode = newMode;
@@ -259,6 +279,7 @@ class _BudgetAppState extends State<BudgetApp> {
                       incomeCategories: _incomeCategories,
                       onAddTransaction: _addTransaction,
                       onRemoveTransaction: _removeTransaction,
+                      onEditTransaction: _editTransaction,
                       onUpdateFilter: _updateFilterRange,
                     ),
                     // --- Tab 2: Chart Screen ---
