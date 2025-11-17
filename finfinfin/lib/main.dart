@@ -4,6 +4,8 @@ import 'dart:convert'; // For JSON encoding/decoding
 import 'package:shared_preferences/shared_preferences.dart'; // For saving data
 import 'package:fl_chart/fl_chart.dart'; // For charts
 import 'package:intl/intl.dart'; // For date formatting
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 void main() {
   // Ensure the app starts with necessary bindings for date formatting
@@ -154,8 +156,9 @@ class _BudgetAppState extends State<BudgetApp> {
     _saveTransactions();
   }
 
-  /// Edit an existing transaction's amount (keeps type, category, date).
-  void _editTransaction(Transaction oldTransaction, double newAmount) {
+  /// Replace an existing transaction with an updated one.
+  /// This supports editing amount, type, and category.
+  void _updateTransaction(Transaction oldTransaction, Transaction newTransaction) {
     final idx = _transactions.indexWhere((t) =>
         t.date == oldTransaction.date &&
         t.type == oldTransaction.type &&
@@ -163,12 +166,7 @@ class _BudgetAppState extends State<BudgetApp> {
         t.amount == oldTransaction.amount);
     if (idx != -1) {
       setState(() {
-        _transactions[idx] = Transaction(
-          amount: newAmount,
-          type: oldTransaction.type,
-          category: oldTransaction.category,
-          date: oldTransaction.date,
-        );
+        _transactions[idx] = newTransaction;
       });
       _saveTransactions();
     }
@@ -275,11 +273,11 @@ class _BudgetAppState extends State<BudgetApp> {
                       allTransactions: _transactions, 
                       currencySymbol: _currencySymbol,
                       filterRange: _filterRange,
-                      expenseCategories: _expenseCategories,
-                      incomeCategories: _incomeCategories,
+                        expenseCategories: _expenseCategories,
+                        incomeCategories: _incomeCategories,
                       onAddTransaction: _addTransaction,
                       onRemoveTransaction: _removeTransaction,
-                      onEditTransaction: _editTransaction,
+                      onEditTransaction: _updateTransaction,
                       onUpdateFilter: _updateFilterRange,
                     ),
                     // --- Tab 2: Chart Screen ---
@@ -416,8 +414,8 @@ class CategorySelectionScreen extends StatelessWidget {
   }
 }
 
-// --- HomeScreen with Filter ---
-class HomeScreen extends StatelessWidget {
+// --- HomeScreen with Year/Month grouping (collapsible mother transactions) ---
+class HomeScreen extends StatefulWidget {
   final List<Transaction> transactions;
   final List<Transaction> allTransactions;
   final String currencySymbol;
@@ -426,7 +424,8 @@ class HomeScreen extends StatelessWidget {
   final List<String> incomeCategories;
   final Function(double, String, String) onAddTransaction;
   final Function(Transaction) onRemoveTransaction;
-  final Function(Transaction, double) onEditTransaction;
+  // onEditTransaction: (oldTransaction, newTransaction)
+  final Function(Transaction, Transaction) onEditTransaction;
   final Function(DateTimeRange?) onUpdateFilter;
 
   const HomeScreen({
@@ -438,78 +437,193 @@ class HomeScreen extends StatelessWidget {
     required this.expenseCategories,
     required this.incomeCategories,
     required this.onAddTransaction,
-  required this.onRemoveTransaction,
-  required this.onEditTransaction,
+    required this.onRemoveTransaction,
+    required this.onEditTransaction,
     required this.onUpdateFilter,
   });
 
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  // Keep track of expanded years and months so users can minimize to mother transactions.
+  final Set<int> _expandedYears = {};
+  final Set<String> _expandedMonths = {}; // key: "{year}-{month}"
+  // Caching to avoid recomputing grouping on every build for large datasets.
+  String? _cachedTxKey;
+  Map<int, Map<int, List<Transaction>>>? _cachedGrouped;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize cache and ensure latest month is expanded initially.
+    _updateCacheAndEnsureLatestExpanded();
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // If transactions reference changed or content changed, update cache and expand latest.
+    final newKey = _computeTxKey(widget.transactions);
+    if (newKey != _cachedTxKey) {
+      setState(() {
+        _updateCacheAndEnsureLatestExpanded();
+      });
+    }
+  }
+
+  String _computeTxKey(List<Transaction> txns) {
+    // Simple checksum: length + concatenation of timestamp and amount for each txn.
+    // This is intentionally simple and fast; it should change when transactions change.
+    final sb = StringBuffer();
+    sb.write(txns.length);
+    for (var t in txns) {
+      sb.write('|${t.date.millisecondsSinceEpoch}:${t.amount}:${t.type}:${t.category}');
+    }
+    return sb.toString();
+  }
+
+  void _updateCacheAndEnsureLatestExpanded() {
+    _cachedTxKey = _computeTxKey(widget.transactions);
+    _cachedGrouped = _groupByYearMonth(widget.transactions);
+    if (widget.transactions.isNotEmpty) {
+      // Find the latest transaction and expand its year/month so latest transactions remain visible.
+      Transaction latest = widget.transactions.first;
+      for (var t in widget.transactions) {
+        if (t.date.isAfter(latest.date)) latest = t;
+      }
+      final ly = latest.date.year;
+      final lm = latest.date.month;
+      _expandedYears.add(ly);
+      _expandedMonths.add('$ly-$lm');
+    }
+  }
+
   String get _filterText {
-    if (filterRange == null) return 'All Time';
-    final start = DateFormat('MMM d, y').format(filterRange!.start);
-    final end = DateFormat('MMM d, y').format(filterRange!.end);
+    if (widget.filterRange == null) return 'All Time';
+    final start = DateFormat('MMM d, y').format(widget.filterRange!.start);
+    final end = DateFormat('MMM d, y').format(widget.filterRange!.end);
     return '$start - $end';
   }
 
   Future<void> _pickDateRange(BuildContext context) async {
     final DateTimeRange? newRange = await showDateRangePicker(
       context: context,
-      firstDate: allTransactions.isNotEmpty
-          ? allTransactions.first.date.subtract(const Duration(days: 30))
+      firstDate: widget.allTransactions.isNotEmpty
+          ? widget.allTransactions.first.date.subtract(const Duration(days: 30))
           : DateTime.now().subtract(const Duration(days: 365)),
       lastDate: DateTime.now().add(const Duration(days: 30)),
-      initialDateRange: filterRange,
+      initialDateRange: widget.filterRange,
     );
-    onUpdateFilter(newRange);
+    widget.onUpdateFilter(newRange);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    double totalBalance = transactions.fold(0.0, (sum, item) {
-      if (item.type == 'income') {
-        return sum + item.amount;
-      } else {
-        return sum - item.amount;
+  // Group transactions into a map: year -> month -> list
+  Map<int, Map<int, List<Transaction>>> _groupByYearMonth(List<Transaction> txns) {
+    final Map<int, Map<int, List<Transaction>>> result = {};
+    for (var t in txns) {
+      final y = t.date.year;
+      final m = t.date.month;
+      result.putIfAbsent(y, () => {});
+      result[y]!.putIfAbsent(m, () => []);
+      result[y]![m]!.add(t);
+    }
+    // Sort each month list by date ascending
+    for (var y in result.keys) {
+      for (var m in result[y]!.keys) {
+        result[y]![m]!.sort((a, b) => a.date.compareTo(b.date));
       }
-    });
+    }
+    return result;
+  }
 
-    // Helper placed in this build so it has access to the HomeScreen
-    // callbacks `onRemoveTransaction` and `onEditTransaction`.
-    void _showTransactionMenu(BuildContext ctx, Offset globalPosition, Transaction transaction) async {
-      final RenderBox overlay = Overlay.of(ctx).context.findRenderObject() as RenderBox;
-      final selected = await showMenu<String>(
+  // Show the same transaction menu used before; extracted to instance method so it has access to widget callbacks.
+  void _showTransactionMenu(BuildContext ctx, Offset globalPosition, Transaction transaction) async {
+    final RenderBox overlay = Overlay.of(ctx).context.findRenderObject() as RenderBox;
+    final selected = await showMenu<String>(
+      context: ctx,
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(globalPosition, globalPosition),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(value: 'edit', child: Text('Edit')),
+        const PopupMenuItem(value: 'delete', child: Text('Delete')),
+      ],
+    );
+
+    if (selected == 'delete') {
+      final confirm = await showDialog<bool>(
         context: ctx,
-        position: RelativeRect.fromRect(
-          Rect.fromPoints(globalPosition, globalPosition),
-          Offset.zero & overlay.size,
+        builder: (dctx) => AlertDialog(
+          title: const Text('Delete Transaction?'),
+          content: const Text('Are you sure you want to delete this transaction?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
+          ],
         ),
-        items: [
-          const PopupMenuItem(value: 'edit', child: Text('Edit')),
-          const PopupMenuItem(value: 'delete', child: Text('Delete')),
-        ],
       );
-
-      if (selected == 'delete') {
-        final confirm = await showDialog<bool>(
-          context: ctx,
-          builder: (dctx) => AlertDialog(
-            title: const Text('Delete Transaction?'),
-            content: const Text('Are you sure you want to delete this transaction?'),
-            actions: [
-              TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('Cancel')),
-              TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
-            ],
+      if (confirm == true) widget.onRemoveTransaction(transaction);
+    } else if (selected == 'edit') {
+      final bool isDesktop = !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
+      if (isDesktop) {
+        final edited = await Navigator.of(ctx).push<Transaction>(
+          MaterialPageRoute(
+            fullscreenDialog: true,
+            builder: (rctx) => TransactionEditorScreen(
+              initial: transaction,
+              expenseCategories: widget.expenseCategories,
+              incomeCategories: widget.incomeCategories,
+            ),
           ),
         );
-        if (confirm == true) onRemoveTransaction(transaction);
-      } else if (selected == 'edit') {
+        if (edited != null) {
+          widget.onEditTransaction(transaction, edited);
+          if (ctx.mounted) {
+            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+              content: Text('Transaction updated: ${widget.currencySymbol}${edited.amount.toStringAsFixed(2)}'),
+              behavior: SnackBarBehavior.floating,
+            ));
+          }
+        }
+      } else {
         final amount = await Navigator.of(ctx).push<double>(
           MaterialPageRoute(builder: (rctx) => ClickwheelInputScreen(title: 'Edit Amount')),
         );
         if (amount != null) {
-          onEditTransaction(transaction, amount);
+          final updated = Transaction(
+            amount: amount,
+            type: transaction.type,
+            category: transaction.category,
+            date: transaction.date,
+          );
+          widget.onEditTransaction(transaction, updated);
+          if (ctx.mounted) {
+            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+              content: Text('Transaction updated: ${widget.currencySymbol}${updated.amount.toStringAsFixed(2)}'),
+              behavior: SnackBarBehavior.floating,
+            ));
+          }
         }
       }
     }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final transactions = widget.transactions;
+
+    double totalBalance = transactions.fold(0.0, (sum, item) {
+      if (item.type == 'income') return sum + item.amount;
+      return sum - item.amount;
+    });
+
+  // Use cached grouping when available to improve performance on large lists.
+  final grouped = _cachedGrouped ?? _groupByYearMonth(transactions);
+    // Sort years descending
+    final years = grouped.keys.toList()..sort((a, b) => b.compareTo(a));
 
     return Column(
       children: [
@@ -519,15 +633,10 @@ class HomeScreen extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                'Showing Data For:',
-                style: Theme.of(context).textTheme.bodyLarge,
-              ),
+              Text('Showing Data For:', style: Theme.of(context).textTheme.bodyLarge),
               DropdownButton<DateTimeRange?>(
-                value: filterRange,
-                onChanged: (DateTimeRange? newRange) {
-                  onUpdateFilter(newRange);
-                },
+                value: widget.filterRange,
+                onChanged: (DateTimeRange? newRange) => widget.onUpdateFilter(newRange),
                 items: [
                   const DropdownMenuItem(value: null, child: Text('All Time')),
                   DropdownMenuItem(value: getThisMonthRange(), child: const Text('This Month')),
@@ -536,12 +645,13 @@ class HomeScreen extends StatelessWidget {
               ),
               TextButton.icon(
                 icon: const Icon(Icons.calendar_today, size: 18),
-                label: Text(filterRange == null ? 'Custom...' : _filterText),
+                label: Text(widget.filterRange == null ? 'Custom...' : _filterText),
                 onPressed: () => _pickDateRange(context),
               ),
             ],
           ),
         ),
+
         // --- Total Balance Card ---
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
@@ -555,7 +665,7 @@ class HomeScreen extends StatelessWidget {
                 children: [
                   const Text('Total Balance:', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                   Text(
-                    '$currencySymbol${totalBalance.toStringAsFixed(2)}',
+                    '${widget.currencySymbol}${totalBalance.toStringAsFixed(2)}',
                     style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
@@ -567,7 +677,8 @@ class HomeScreen extends StatelessWidget {
             ),
           ),
         ),
-        // --- Transaction List ---
+
+        // --- Grouped Transaction List (Years -> Months -> Transactions) ---
         Expanded(
           child: transactions.isEmpty
               ? const Center(
@@ -578,64 +689,101 @@ class HomeScreen extends StatelessWidget {
                   ),
                 )
               : ListView.builder(
-                  itemCount: transactions.length,
-                  itemBuilder: (context, index) {
-                      final transaction = transactions[transactions.length - 1 - index];
-                    final sign = transaction.type == 'income' ? '+' : '-';
-                    final color = transaction.type == 'income' ? Colors.green : Colors.red;
+                  itemCount: years.length,
+                  itemBuilder: (context, yi) {
+                    final year = years[yi];
+                    final monthsMap = grouped[year]!;
+                    final months = monthsMap.keys.toList()..sort((a, b) => b.compareTo(a));
 
-                      // Wrap in Dismissible to allow swipe-to-delete (swipe left or right)
-                      return Dismissible(
-                        key: ValueKey(transaction.date.toIso8601String() + transaction.amount.toString()),
-                        direction: DismissDirection.horizontal,
-                        background: Container(
-                          color: Colors.redAccent,
-                          alignment: Alignment.centerLeft,
-                          padding: const EdgeInsets.only(left: 20),
-                          child: const Icon(Icons.delete, color: Colors.white),
-                        ),
-                        secondaryBackground: Container(
-                          color: Colors.redAccent,
-                          alignment: Alignment.centerRight,
-                          padding: const EdgeInsets.only(right: 20),
-                          child: const Icon(Icons.delete, color: Colors.white),
-                        ),
-                        onDismissed: (direction) {
-                          onRemoveTransaction(transaction);
-                        },
-                        child: Card(
-                          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                          child: GestureDetector(
-                            // Long-press (touch) and right-click (secondary tap) will show a context menu
-                            onLongPressStart: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
-                            onSecondaryTapDown: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
-                            child: ListTile(
-                              leading: Icon(
-                                transaction.type == 'income' ? Icons.arrow_circle_up : Icons.arrow_circle_down,
-                                color: color,
+                    // Year total
+                    double yearTotal = 0;
+                    for (var m in months) {
+                      for (var t in monthsMap[m]!) {
+                        yearTotal += t.type == 'income' ? t.amount : -t.amount;
+                      }
+                    }
+
+                    final yearExpanded = _expandedYears.contains(year);
+
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      child: ExpansionTile(
+                        key: ValueKey('year-$year'),
+                        initiallyExpanded: yearExpanded,
+                        title: Text('$year', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                        trailing: Text('${widget.currencySymbol}${yearTotal.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        onExpansionChanged: (open) => setState(() {
+                          if (open) _expandedYears.add(year); else _expandedYears.remove(year);
+                        }),
+                        children: months.map((month) {
+                          final monthKey = '$year-$month';
+                          final txns = monthsMap[month]!;
+                          // Month total
+                          double monthTotal = txns.fold(0.0, (s, t) => s + (t.type == 'income' ? t.amount : -t.amount));
+
+                          final monthExpanded = _expandedMonths.contains(monthKey);
+                          final monthName = DateFormat('MMMM').format(DateTime(year, month));
+
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                            child: ExpansionTile(
+                              key: ValueKey('month-$monthKey'),
+                              title: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text('$monthName', style: const TextStyle(fontWeight: FontWeight.w600)),
+                                  Text('${txns.length} items', style: const TextStyle(color: Colors.grey)),
+                                ],
                               ),
-                              title: Text(
-                                transaction.category,
-                                style: const TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                              subtitle: Text(
-                                '${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}',
-                              ),
-                              trailing: Text(
-                                '$sign $currencySymbol${transaction.amount.toStringAsFixed(2)}',
-                                style: TextStyle(
-                                  color: color,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
+                              subtitle: Text('${widget.currencySymbol}${monthTotal.toStringAsFixed(2)}'),
+                              initiallyExpanded: monthExpanded,
+                              onExpansionChanged: (open) => setState(() {
+                                if (open) _expandedMonths.add(monthKey); else _expandedMonths.remove(monthKey);
+                              }),
+                              children: txns.reversed.map((transaction) {
+                                final sign = transaction.type == 'income' ? '+' : '-';
+                                final color = transaction.type == 'income' ? Colors.green : Colors.red;
+
+                                return Dismissible(
+                                  key: ValueKey(transaction.date.toIso8601String() + transaction.amount.toString()),
+                                  direction: DismissDirection.horizontal,
+                                  background: Container(
+                                    color: Colors.redAccent,
+                                    alignment: Alignment.centerLeft,
+                                    padding: const EdgeInsets.only(left: 20),
+                                    child: const Icon(Icons.delete, color: Colors.white),
+                                  ),
+                                  secondaryBackground: Container(
+                                    color: Colors.redAccent,
+                                    alignment: Alignment.centerRight,
+                                    padding: const EdgeInsets.only(right: 20),
+                                    child: const Icon(Icons.delete, color: Colors.white),
+                                  ),
+                                  onDismissed: (_) => widget.onRemoveTransaction(transaction),
+                                  child: Card(
+                                    margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                    child: GestureDetector(
+                                      onLongPressStart: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
+                                      onSecondaryTapDown: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
+                                      child: ListTile(
+                                        leading: Icon(transaction.type == 'income' ? Icons.arrow_circle_up : Icons.arrow_circle_down, color: color),
+                                        title: Text(transaction.category, style: const TextStyle(fontWeight: FontWeight.bold)),
+                                        subtitle: Text('${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}'),
+                                        trailing: Text('$sign ${widget.currencySymbol}${transaction.amount.toStringAsFixed(2)}', style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16)),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
                             ),
-                          ),
-                        ),
-                      );
+                          );
+                        }).toList(),
+                      ),
+                    );
                   },
                 ),
         ),
+
         // --- Add Buttons ---
         Padding(
           padding: const EdgeInsets.all(16.0),
@@ -649,8 +797,8 @@ class HomeScreen extends StatelessWidget {
                       MaterialPageRoute(
                         builder: (ctx) => CategorySelectionScreen(
                           type: 'income',
-                          categories: incomeCategories,
-                          onConfirmTransaction: onAddTransaction,
+                          categories: widget.incomeCategories,
+                          onConfirmTransaction: widget.onAddTransaction,
                         ),
                       ),
                     );
@@ -672,8 +820,8 @@ class HomeScreen extends StatelessWidget {
                       MaterialPageRoute(
                         builder: (ctx) => CategorySelectionScreen(
                           type: 'expense',
-                          categories: expenseCategories,
-                          onConfirmTransaction: onAddTransaction,
+                          categories: widget.expenseCategories,
+                          onConfirmTransaction: widget.onAddTransaction,
                         ),
                       ),
                     );
@@ -1249,6 +1397,184 @@ class ClickwheelInputScreen extends StatefulWidget {
 
   @override
   State<ClickwheelInputScreen> createState() => _ClickwheelInputScreenState();
+}
+
+
+// --- Transaction Editor (Full editor used on Desktop) ---
+class TransactionEditorScreen extends StatefulWidget {
+  final Transaction initial;
+  final List<String> expenseCategories;
+  final List<String> incomeCategories;
+
+  const TransactionEditorScreen({
+    super.key,
+    required this.initial,
+    required this.expenseCategories,
+    required this.incomeCategories,
+  });
+
+  @override
+  State<TransactionEditorScreen> createState() => _TransactionEditorScreenState();
+}
+
+class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
+  late TextEditingController _amountController;
+  late String _type; // 'income' or 'expense'
+  late String _category;
+
+  @override
+  void initState() {
+    super.initState();
+    _amountController = TextEditingController(text: widget.initial.amount.toStringAsFixed(2));
+    _type = widget.initial.type;
+    // Initialize category to the initial transaction's category if present,
+    // otherwise fall back to the first available category or empty string.
+    final initialList = _type == 'expense' ? widget.expenseCategories : widget.incomeCategories;
+    if (initialList.contains(widget.initial.category)) {
+      _category = widget.initial.category;
+    } else if (initialList.isNotEmpty) {
+      _category = initialList.first;
+    } else {
+      _category = '';
+    }
+  }
+
+  @override
+  void dispose() {
+    _amountController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final categories = _type == 'expense' ? widget.expenseCategories : widget.incomeCategories;
+
+    bool hasCategories = categories.isNotEmpty;
+
+    bool canSave() {
+      final text = _amountController.text.trim();
+      final value = double.tryParse(text);
+      return hasCategories && value != null && value > 0 && _category.isNotEmpty;
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Edit Transaction'),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 8),
+            TextField(
+              controller: _amountController,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: false),
+              decoration: const InputDecoration(
+                labelText: 'Amount',
+                border: OutlineInputBorder(),
+                prefixText: '',
+              ),
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: _type,
+              decoration: const InputDecoration(labelText: 'Type', border: OutlineInputBorder()),
+              items: const [
+                DropdownMenuItem(value: 'income', child: Text('Income')),
+                DropdownMenuItem(value: 'expense', child: Text('Expense')),
+              ],
+              onChanged: (v) {
+                if (v == null) return;
+                setState(() {
+                  _type = v;
+                  // If the current category isn't in the new list, pick the first available
+                  final list = _type == 'expense' ? widget.expenseCategories : widget.incomeCategories;
+                  if (!list.contains(_category) && list.isNotEmpty) {
+                    _category = list.first;
+                  } else if (list.isEmpty) {
+                    _category = '';
+                  }
+                });
+              },
+            ),
+            const SizedBox(height: 16),
+            // Category selector: show ChoiceChips so the selected category is visually highlighted.
+            if (hasCategories) ...[
+              const Text('Category', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: categories.map((c) {
+                  final selected = c == _category;
+                  return ChoiceChip(
+                    label: Text(c),
+                    selected: selected,
+                    onSelected: (sel) {
+                      if (sel) setState(() => _category = c);
+                    },
+                    selectedColor: Theme.of(context).colorScheme.primary.withOpacity(0.2),
+                    backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+                    side: selected ? BorderSide(color: Theme.of(context).colorScheme.primary, width: 1.5) : null,
+                  );
+                }).toList(),
+              ),
+            ] else ...[
+              // When there are no categories available for the chosen type, show guidance.
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  color: Theme.of(context).colorScheme.error.withOpacity(0.08),
+                ),
+                child: Text(
+                  'No categories available for "${_type}". Add categories in Settings before saving.',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            ],
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).pop<Transaction?>(null);
+                    },
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: canSave() ? () {
+                      final text = _amountController.text.trim();
+                      final value = double.tryParse(text);
+                      if (value == null || value <= 0) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a valid amount greater than 0')));
+                        return;
+                      }
+                      final updated = Transaction(
+                        amount: value,
+                        type: _type,
+                        category: _category,
+                        date: widget.initial.date,
+                      );
+                      Navigator.of(context).pop<Transaction>(updated);
+                    } : null,
+                    child: const Text('Save'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
