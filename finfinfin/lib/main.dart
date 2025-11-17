@@ -22,10 +22,6 @@ const List<String> defaultIncomeCategories = [
 ];
 
 // Helper to determine the start and end of the current month
-/// Returns a [DateTimeRange] that covers the current calendar month.
-///
-/// Start: first day of the current month at midnight.
-/// End: last day of the current month (calculated by using month+1, day 0).
 DateTimeRange getThisMonthRange() {
   final now = DateTime.now();
   final firstDay = DateTime(now.year, now.month, 1);
@@ -34,10 +30,6 @@ DateTimeRange getThisMonthRange() {
 }
 
 // Helper to determine the start and end of the last month
-/// Returns a [DateTimeRange] that covers the previous calendar month.
-///
-/// Start: first day of the previous month.
-/// End: last day of the previous month.
 DateTimeRange getLastMonthRange() {
   final now = DateTime.now();
   final firstDayOfCurrentMonth = DateTime(now.year, now.month, 1);
@@ -47,11 +39,6 @@ DateTimeRange getLastMonthRange() {
 }
 
 // --- Main App Widget (Manages Global State: Theme, Currency, and Filter) ---
-/// Root widget for the application.
-///
-/// Manages top-level state via [_BudgetAppState], including theme mode,
-/// currency symbol, stored categories and transactions. This widget
-/// simply creates the state container — all app logic lives in the state.
 class BudgetApp extends StatefulWidget {
   const BudgetApp({super.key});
 
@@ -79,16 +66,8 @@ class _BudgetAppState extends State<BudgetApp> {
     _loadSettingsAndData();
   }
 
-  /// Called when this State object is first created.
-  ///
-  /// Kicks off loading persisted settings and transactions from
-  /// SharedPreferences so the UI can be populated.
-
   // --- Persistence & Initialization ---
-  /// Load persisted settings (theme, currency, categories) and transactions.
-  ///
-  /// Reads from `SharedPreferences`. If transaction data is corrupted
-  /// it will skip invalid entries and continue loading valid ones.
+
   Future<void> _loadSettingsAndData() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -130,9 +109,6 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   Future<void> _saveTransactions() async {
-  /// Persist the current transactions list to `SharedPreferences`.
-  ///
-  /// Serializes each `Transaction` to JSON before saving.
     final prefs = await SharedPreferences.getInstance();
     final transactionStrings = _transactions.map((transaction) {
       final jsonMap = transaction.toJson();
@@ -142,17 +118,12 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   Future<void> _saveCategories() async {
-  /// Persist current category lists (expense and income) to storage.
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('expenseCategories', _expenseCategories);
     await prefs.setStringList('incomeCategories', _incomeCategories);
   }
 
   Future<void> _saveSettings({String? currency, ThemeMode? mode}) async {
-  /// Save lightweight app settings such as currency symbol and theme mode.
-  ///
-  /// Only writes values that are provided (non-null) to avoid overwriting
-  /// other settings unintentionally.
     final prefs = await SharedPreferences.getInstance();
     if (currency != null) {
       await prefs.setString('currencySymbol', currency);
@@ -165,11 +136,6 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- App Logic Methods ---
 
   void _addTransaction(double amount, String type, String category) {
-  /// Add a new transaction to the in-memory list and persist it.
-  ///
-  /// - `amount`: positive numeric value (double)
-  /// - `type`: either 'income' or 'expense'
-  /// - `category`: one of the configured categories
     setState(() {
       _transactions.add(Transaction(
           amount: amount,
@@ -182,7 +148,6 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _removeTransaction(Transaction transactionToRemove) {
-  /// Remove a transaction from memory and persist the updated list.
     setState(() {
       _transactions.remove(transactionToRemove);
     });
@@ -190,7 +155,6 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _updateThemeMode(ThemeMode newMode) {
-  /// Update the app's theme mode and persist the selection.
     setState(() {
       _themeMode = newMode;
     });
@@ -198,7 +162,6 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _updateCurrency(String newCurrency) {
-  /// Update the displayed currency symbol and save to preferences.
     setState(() {
       _currencySymbol = newCurrency;
     });
@@ -206,16 +169,12 @@ class _BudgetAppState extends State<BudgetApp> {
   }
 
   void _updateFilterRange(DateTimeRange? newRange) {
-  /// Update the currently applied date filter range used by the UI.
     setState(() {
       _filterRange = newRange;
     });
   }
 
   void _updateCategories(String type, List<String> newCategories) {
-  /// Update category lists (expense or income) and save immediately.
-  ///
-  /// `type` must be either 'expense' or 'income'.
     setState(() {
       if (type == 'expense') {
         _expenseCategories = newCategories;
@@ -229,7 +188,6 @@ class _BudgetAppState extends State<BudgetApp> {
 
   // Filtered List Getter
   List<Transaction> get _filteredTransactions {
-    // Return all transactions when no range filter is set.
     if (_filterRange == null) {
       return _transactions;
     }
@@ -244,10 +202,7 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- Build Method ---
   @override
   Widget build(BuildContext context) {
-    /// Build the root [MaterialApp] and wire up top-level routes/tabs.
-    ///
-    /// This method constructs themes, tabs and passes callbacks to child
-    /// widgets so they can mutate top-level state via provided functions.
+    
     const Color primaryBlue = Color(0xFF00BCD4);
 
     return MaterialApp(
@@ -339,27 +294,18 @@ class _BudgetAppState extends State<BudgetApp> {
 }
 
 // --- Transaction Data Model ---
-/// Immutable data model that represents a single financial transaction.
-///
-/// Fields:
-/// - [amount]: numeric transaction amount (double).
-/// - [type]: 'income' or 'expense'.
-/// - [category]: user-defined category string.
-/// - [date]: timestamp of the transaction.
 class Transaction {
   final double amount;
   final String type; // 'income' or 'expense'
   final String category;
   final DateTime date;
 
-  /// Create a [Transaction] from given values.
   Transaction(
-    {required this.amount,
-    required this.type,
-    required this.category,
-    required this.date});
+      {required this.amount,
+      required this.type,
+      required this.category,
+      required this.date});
 
-  /// Serialize this [Transaction] to a JSON-compatible map.
   Map<String, dynamic> toJson() => {
         'amount': amount,
         'type': type,
@@ -367,11 +313,6 @@ class Transaction {
         'date': date.toIso8601String(),
       };
 
-  /// Create a [Transaction] from a decoded JSON map.
-  ///
-  /// Performs defensive checks and converts numeric values safely into
-  /// `double` using `toDouble()` so both `int` and `double` JSON values
-  /// are handled.
   factory Transaction.fromJson(Map<String, dynamic> json) {
     // Add checks to ensure data integrity
     if (json['amount'] == null ||
@@ -400,11 +341,6 @@ class CategorySelectionScreen extends StatelessWidget {
       {super.key, required this.type, required this.categories, required this.onConfirmTransaction});
 
   @override
-  /// Build the category selection UI.
-  ///
-  /// Presents available categories in a grid. When a category is selected
-  /// it navigates to the amount input screen and calls `onConfirmTransaction`
-  /// with the entered amount, selected type and category.
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -469,6 +405,7 @@ class HomeScreen extends StatelessWidget {
   final List<String> incomeCategories;
   final Function(double, String, String) onAddTransaction;
   final Function(Transaction) onRemoveTransaction;
+  final Function(Transaction, double) onEditTransaction;
   final Function(DateTimeRange?) onUpdateFilter;
 
   const HomeScreen({
@@ -480,26 +417,20 @@ class HomeScreen extends StatelessWidget {
     required this.expenseCategories,
     required this.incomeCategories,
     required this.onAddTransaction,
-    required this.onRemoveTransaction,
+  required this.onRemoveTransaction,
+  required this.onEditTransaction,
     required this.onUpdateFilter,
   });
 
   String get _filterText {
-  /// Human-readable label for the currently applied date filter.
-  ///
-  /// Returns 'All Time' when no filter is set, otherwise formats the
-  /// start and end dates using `intl` for display in the UI.
-  if (filterRange == null) return 'All Time';
-  final start = DateFormat('MMM d, y').format(filterRange!.start);
-  final end = DateFormat('MMM d, y').format(filterRange!.end);
-  return '$start - $end';
+    if (filterRange == null) return 'All Time';
+    final start = DateFormat('MMM d, y').format(filterRange!.start);
+    final end = DateFormat('MMM d, y').format(filterRange!.end);
+    return '$start - $end';
   }
 
   Future<void> _pickDateRange(BuildContext context) async {
-  /// Show a modal date-range picker and call the parent callback with the
-  /// chosen range (or null if cancelled). The picker bounds are computed
-  /// relative to available transaction history.
-  final DateTimeRange? newRange = await showDateRangePicker(
+    final DateTimeRange? newRange = await showDateRangePicker(
       context: context,
       firstDate: allTransactions.isNotEmpty
           ? allTransactions.first.date.subtract(const Duration(days: 30))
@@ -519,6 +450,45 @@ class HomeScreen extends StatelessWidget {
         return sum - item.amount;
       }
     });
+
+    // Helper placed in this build so it has access to the HomeScreen
+    // callbacks `onRemoveTransaction` and `onEditTransaction`.
+    void _showTransactionMenu(BuildContext ctx, Offset globalPosition, Transaction transaction) async {
+      final RenderBox overlay = Overlay.of(ctx).context.findRenderObject() as RenderBox;
+      final selected = await showMenu<String>(
+        context: ctx,
+        position: RelativeRect.fromRect(
+          Rect.fromPoints(globalPosition, globalPosition),
+          Offset.zero & overlay.size,
+        ),
+        items: [
+          const PopupMenuItem(value: 'edit', child: Text('Edit')),
+          const PopupMenuItem(value: 'delete', child: Text('Delete')),
+        ],
+      );
+
+      if (selected == 'delete') {
+        final confirm = await showDialog<bool>(
+          context: ctx,
+          builder: (dctx) => AlertDialog(
+            title: const Text('Delete Transaction?'),
+            content: const Text('Are you sure you want to delete this transaction?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
+            ],
+          ),
+        );
+        if (confirm == true) onRemoveTransaction(transaction);
+      } else if (selected == 'edit') {
+        final amount = await Navigator.of(ctx).push<double>(
+          MaterialPageRoute(builder: (rctx) => ClickwheelInputScreen(title: 'Edit Amount')),
+        );
+        if (amount != null) {
+          onEditTransaction(transaction, amount);
+        }
+      }
+    }
 
     return Column(
       children: [
@@ -589,57 +559,59 @@ class HomeScreen extends StatelessWidget {
               : ListView.builder(
                   itemCount: transactions.length,
                   itemBuilder: (context, index) {
-                    final transaction = transactions[transactions.length - 1 - index];
+                      final transaction = transactions[transactions.length - 1 - index];
                     final sign = transaction.type == 'income' ? '+' : '-';
                     final color = transaction.type == 'income' ? Colors.green : Colors.red;
-                    
-                    return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      child: ListTile(
-                        leading: Icon(
-                          transaction.type == 'income' ? Icons.arrow_circle_up : Icons.arrow_circle_down,
-                          color: color,
+
+                      // Wrap in Dismissible to allow swipe-to-delete (swipe left or right)
+                      return Dismissible(
+                        key: ValueKey(transaction.date.toIso8601String() + transaction.amount.toString()),
+                        direction: DismissDirection.horizontal,
+                        background: Container(
+                          color: Colors.redAccent,
+                          alignment: Alignment.centerLeft,
+                          padding: const EdgeInsets.only(left: 20),
+                          child: const Icon(Icons.delete, color: Colors.white),
                         ),
-                        title: Text(
-                          transaction.category,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        secondaryBackground: Container(
+                          color: Colors.redAccent,
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 20),
+                          child: const Icon(Icons.delete, color: Colors.white),
                         ),
-                        subtitle: Text(
-                          '${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}',
-                        ),
-                        trailing: Text(
-                          '$sign $currencySymbol${transaction.amount.toStringAsFixed(2)}',
-                          style: TextStyle(
-                            color: color,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                        onDismissed: (direction) {
+                          onRemoveTransaction(transaction);
+                        },
+                        child: Card(
+                          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          child: GestureDetector(
+                            // Long-press (touch) and right-click (secondary tap) will show a context menu
+                            onLongPressStart: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
+                            onSecondaryTapDown: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
+                            child: ListTile(
+                              leading: Icon(
+                                transaction.type == 'income' ? Icons.arrow_circle_up : Icons.arrow_circle_down,
+                                color: color,
+                              ),
+                              title: Text(
+                                transaction.category,
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              subtitle: Text(
+                                '${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}',
+                              ),
+                              trailing: Text(
+                                '$sign $currencySymbol${transaction.amount.toStringAsFixed(2)}',
+                                style: TextStyle(
+                                  color: color,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ),
                           ),
                         ),
-                        onLongPress: () {
-                          // Show deletion confirmation dialog
-                          showDialog(
-                            context: context,
-                            builder: (ctx) => AlertDialog(
-                              title: const Text('Delete Transaction?'),
-                              content: const Text('Are you sure you want to delete this item?'),
-                              actions: [
-                                TextButton(
-                                  child: const Text('Cancel'),
-                                  onPressed: () => Navigator.of(ctx).pop(),
-                                ),
-                                TextButton(
-                                  child: const Text('Delete', style: TextStyle(color: Colors.red)),
-                                  onPressed: () {
-                                    onRemoveTransaction(transaction);
-                                    Navigator.of(ctx).pop();
-                                  },
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    );
+                      );
                   },
                 ),
         ),
@@ -710,11 +682,6 @@ class ChartScreen extends StatelessWidget {
 
   // Helper to generate data for the wealth line chart
   List<FlSpot> _getWealthData() {
-  /// Generate a running wealth series from the transaction list.
-  ///
-  /// Returns an ordered list of [FlSpot] points where the x-axis is the
-  /// transaction index and the y-axis is the running balance after that
-  /// transaction (income adds, expense subtracts).
     final List<FlSpot> data = [];
     double runningTotal = 0.0;
 
@@ -734,7 +701,6 @@ class ChartScreen extends StatelessWidget {
 
   // Helper to calculate total expenses by category
   Map<String, double> getExpenseCategoryTotals(List<Transaction> txns) {
-  /// Aggregate expense totals grouped by category.
     final Map<String, double> totals = {};
     for (var txn in txns.where((t) => t.type == 'expense')) {
       totals.update(txn.category, (value) => value + txn.amount,
@@ -745,8 +711,6 @@ class ChartScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    /// Build chart-related UI: pie, line and bar charts that visualise
-    /// expenses, wealth over time, and income vs expense totals.
     if (transactions.isEmpty) {
       return const Center(
         child: Text(
@@ -810,10 +774,6 @@ class ChartScreen extends StatelessWidget {
 
   Widget _buildExpensePieChart(BuildContext context,
       Map<String, double> totals, double totalAmount) {
-    /// Build a pie chart widget showing expenses broken down by category.
-    ///
-    /// If there are no expenses in the period, returns a friendly message
-    /// instead of an empty chart.
     if (totalAmount == 0) {
       return const Center(
           child: Padding(
@@ -865,10 +825,6 @@ class ChartScreen extends StatelessWidget {
 
   Widget _buildLineChart(BuildContext context, List<FlSpot> wealthData,
       String currencySymbol, double minY, double maxY) {
-    /// Build the line chart that shows running wealth over time.
-    ///
-    /// Accepts bounds `minY`/`maxY` and a precomputed list of [FlSpot]
-    /// points. Handles empty datasets gracefully.
     return Container(
       height: 300,
       padding: const EdgeInsets.all(10),
@@ -924,8 +880,6 @@ class ChartScreen extends StatelessWidget {
 
   Widget _buildBarChart(BuildContext context, double totalIncome,
       double totalExpense, String currencySymbol, double totalMaxY) {
-    /// Build a simple bar chart comparing total income vs total expense
-    /// for the selected period.
     return Container(
       height: 300,
       padding: const EdgeInsets.all(10),
@@ -1026,10 +980,6 @@ class SettingsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    /// Build the settings modal sheet UI.
-    ///
-    /// Exposes theme, currency and category editors; relays updates back
-    /// to the parent via the provided callbacks.
     return SingleChildScrollView(
       padding: EdgeInsets.only(
         top: 20,
@@ -1140,10 +1090,6 @@ class _CategoryEditorState extends State<CategoryEditor> {
     super.initState();
     _localCategories = List.from(widget.categories);
   }
-  /// Initialize local state from widget properties.
-  ///
-  /// Copies the provided category list so edits are staged locally and
-  /// only pushed to parent via `onUpdate` when changes are committed.
   
   @override
   void didUpdateWidget(covariant CategoryEditor oldWidget) {
@@ -1152,8 +1098,6 @@ class _CategoryEditorState extends State<CategoryEditor> {
       _localCategories = List.from(widget.categories);
     }
   }
-  /// Called when the parent widget updates properties; keep the local
-  /// staged copy in sync with newly-provided categories.
 
   void _addCategory() {
     final newCategory = _controller.text.trim();
@@ -1164,9 +1108,6 @@ class _CategoryEditorState extends State<CategoryEditor> {
       widget.onUpdate(widget.type, _localCategories); 
     }
   }
-  /// Add a new category to the local list and notify the parent.
-  ///
-  /// Duplicate names are ignored. The UI is updated by the parent callback.
 
   void _removeCategory(String category) {
     // --- FIX for Problem 3: Check if category is in use ---
@@ -1198,8 +1139,6 @@ class _CategoryEditorState extends State<CategoryEditor> {
     }
     // --- End of FIX ---
   }
-  /// Remove a category after confirming it is not used by any existing
-  /// transactions. If it is in use, shows an alert and aborts deletion.
 
   @override
   Widget build(BuildContext context) {
@@ -1295,7 +1234,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   int _currentDigit = 0;
   List<int> _inputDigits = [];
   Timer? _digitConfirmationTimer;
-  bool _isTimerActive = false;
   double _currentValue = 0.0;
 
   @override
@@ -1303,14 +1241,12 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     super.initState();
     _startDigitConfirmationTimer();
   }
-  /// Initialize digit entry state and start the confirmation timer.
 
   @override
   void dispose() {
     _digitConfirmationTimer?.cancel();
     super.dispose();
   }
-  /// Cleanup timers when the input screen is disposed.
 
   void _incrementDigit() {
     setState(() {
@@ -1318,7 +1254,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _resetDigitConfirmationTimer();
     });
   }
-  /// Rotate the currently-selected digit up (0-9) and reset the timer.
 
   void _decrementDigit() {
     setState(() {
@@ -1326,7 +1261,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _resetDigitConfirmationTimer();
     });
   }
-  /// Rotate the currently-selected digit down (0-9) and reset the timer.
 
   void _addDigit() {
     setState(() {
@@ -1336,7 +1270,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _resetDigitConfirmationTimer();
     });
   }
-  /// Commit the current digit into the input buffer and recompute value.
 
   void _removeLastDigit() {
     setState(() {
@@ -1350,7 +1283,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       }
     });
   }
-  /// Remove the last committed digit from the input buffer.
 
   void _updateCurrentValue() {
     String numStr = _inputDigits.map((e) => e.toString()).join();
@@ -1360,34 +1292,22 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       _currentValue = (int.tryParse(numStr) ?? 0) / 100.0;
     }
   }
-  /// Recalculate the numeric value from the committed digits.
-  ///
-  /// The input Treats the digits as cents (i.e. last two digits are fractional)
-  /// by dividing the parsed integer by 100.
 
   void _startDigitConfirmationTimer() {
     _digitConfirmationTimer?.cancel();
-    _isTimerActive = true;
     _digitConfirmationTimer = Timer(const Duration(seconds: 1), () {
       if (mounted) {
         _addDigit();
-        _isTimerActive = false;
       }
     });
   }
-  /// Start or restart the 1-second confirmation timer which auto-commits
-  /// the current digit if the user does not change it within the period.
 
   void _resetDigitConfirmationTimer() {
     _startDigitConfirmationTimer();
   }
-  /// Convenience wrapper to restart the confirmation timer.
 
   @override
   Widget build(BuildContext context) {
-    /// Build the clickwheel-like numeric input UI that lets users dial
-    /// digits and commit them. Returns the entered numeric value to the
-    /// caller when 'Done' is pressed.
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
