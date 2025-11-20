@@ -4,13 +4,20 @@ import 'dart:convert'; // For JSON encoding/decoding
 import 'package:shared_preferences/shared_preferences.dart'; // For saving data
 import 'package:fl_chart/fl_chart.dart'; // For charts
 import 'package:intl/intl.dart'; // For date formatting
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, File;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 void main() {
   // Ensure the app starts with necessary bindings for date formatting
   Intl.defaultLocale = 'en_US';
-  runApp(const BudgetApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  // Wrap the app with a top-level MaterialApp to guarantee MaterialLocalizations
+  // are available to any widget that may be built during initialization.
+  runApp(const MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: BudgetApp(),
+  ));
 }
 
 // --- Global Default Categories (Used only for first run) ---
@@ -258,8 +265,8 @@ class _BudgetAppState extends State<BudgetApp> {
             ],
             bottom: const TabBar(
               tabs: [
-                Tab(icon: Icon(Icons.list_alt), text: 'Transactions'),
-                Tab(icon: Icon(Icons.show_chart), text: 'Charts'),
+                const Tab(icon: Icon(Icons.list_alt), text: 'Transactions'),
+                const Tab(icon: Icon(Icons.show_chart), text: 'Charts'),
               ],
             ),
           ),
@@ -306,9 +313,72 @@ class _BudgetAppState extends State<BudgetApp> {
           onUpdateTheme: _updateThemeMode,
           onUpdateCurrency: _updateCurrency,
           onUpdateCategories: _updateCategories, 
+          onImportTransactions: (jsonString) => _importTransactionsFromJsonString(ctx, jsonString),
         );
       },
     );
+  }
+
+  /// Import transactions from a JSON string. Accepts either:
+  /// - A JSON array of strings (each string is a JSON-encoded transaction map), or
+  /// - A JSON array of maps (each is a transaction map).
+  /// This replaces any existing transactions (old data is deleted) and persists the new set.
+  Future<void> _importTransactionsFromJsonString(BuildContext ctx, String jsonString) async {
+    try {
+      final decoded = json.decode(jsonString);
+      if (decoded is! List) throw const FormatException('Top-level JSON value must be an array');
+
+      final List<String> stringList = [];
+      final List<Transaction> parsed = [];
+
+      for (var item in decoded) {
+        if (item is String) {
+          // item is already a JSON-encoded transaction string
+          try {
+            final map = json.decode(item) as Map<String, dynamic>;
+            parsed.add(Transaction.fromJson(map));
+            stringList.add(item);
+          } catch (e) {
+            // skip invalid entries
+            continue;
+          }
+        } else if (item is Map<String, dynamic>) {
+          try {
+            parsed.add(Transaction.fromJson(item));
+            stringList.add(json.encode(item));
+          } catch (e) {
+            continue;
+          }
+        } else {
+          // unsupported entry type, skip
+          continue;
+        }
+      }
+
+      // Replace existing transactions with the new parsed list
+      setState(() {
+        _transactions = parsed;
+      });
+      await _saveTransactions();
+
+      if (ctx.mounted) {
+        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+          content: Text('Imported ${_transactions.length} transactions'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      if (ctx.mounted) {
+        showDialog(
+          context: ctx,
+          builder: (dctx) => AlertDialog(
+            title: const Text('Import Failed'),
+            content: Text('Failed to parse the provided JSON: $e'),
+            actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK'))],
+          ),
+        );
+      }
+    }
   }
 }
 
@@ -1134,6 +1204,7 @@ class SettingsSheet extends StatelessWidget {
   final Function(ThemeMode) onUpdateTheme;
   final Function(String) onUpdateCurrency;
   final Function(String, List<String>) onUpdateCategories;
+  final Function(String) onImportTransactions;
 
   const SettingsSheet({
     super.key,
@@ -1145,6 +1216,7 @@ class SettingsSheet extends StatelessWidget {
     required this.onUpdateTheme,
     required this.onUpdateCurrency,
     required this.onUpdateCategories,
+    required this.onImportTransactions,
   });
 
   @override
@@ -1222,6 +1294,117 @@ class SettingsSheet extends StatelessWidget {
             categories: incomeCategories,
             allTransactions: allTransactions, // Pass list
             onUpdate: onUpdateCategories,
+          ),
+          const SizedBox(height: 20),
+          ListTile(
+            leading: const Icon(Icons.upload_file),
+            title: const Text('Import Transactions'),
+            subtitle: const Text('Paste a JSON array or provide a file path'),
+            onTap: () {
+              final TextEditingController pathController = TextEditingController();
+              final TextEditingController pasteController = TextEditingController();
+              showDialog<void>(
+                context: context,
+                builder: (dctx) {
+                  return AlertDialog(
+                    title: const Text('Import Transactions'),
+                    content: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: pathController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Optional: Path to JSON file',
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              ElevatedButton.icon(
+                                icon: const Icon(Icons.folder_open),
+                                label: const Text('Pick'),
+                                onPressed: () async {
+                                  try {
+                                    final result = await FilePicker.platform.pickFiles(
+                                      type: FileType.custom,
+                                      allowedExtensions: ['json'],
+                                    );
+                                    if (result != null && result.files.isNotEmpty) {
+                                      final fp = result.files.first;
+                                      final path = fp.path;
+                                      if (path != null) {
+                                        pathController.text = path;
+                                        try {
+                                          final file = File(path);
+                                          final content = await file.readAsString();
+                                          pasteController.text = content;
+                                        } catch (e) {
+                                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to read picked file: $e')));
+                                        }
+                                      }
+                                    }
+                                  } catch (e) {
+                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('File picker failed: $e')));
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: pasteController,
+                            decoration: const InputDecoration(
+                              labelText: 'Or paste JSON array here',
+                              alignLabelWithHint: true,
+                            ),
+                            minLines: 6,
+                            maxLines: 12,
+                          ),
+                        ],
+                      ),
+                    ),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('Cancel')),
+                      TextButton(
+                        onPressed: () async {
+                          String? content;
+                          final path = pathController.text.trim();
+                          if (path.isNotEmpty) {
+                            try {
+                              final file = File(path);
+                              if (await file.exists()) {
+                                content = await file.readAsString();
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
+                                return;
+                              }
+                            } catch (e) {
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to read file: $e')));
+                              return;
+                            }
+                          } else {
+                            content = pasteController.text.trim();
+                          }
+
+                          if (content.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No JSON provided')));
+                            return;
+                          }
+
+                          Navigator.of(dctx).pop();
+                          // Call the provided import handler
+                          onImportTransactions(content);
+                        },
+                        child: const Text('Import'),
+                      ),
+                    ],
+                  );
+                },
+              );
+            },
           ),
         ],
       ),
@@ -1399,7 +1582,6 @@ class ClickwheelInputScreen extends StatefulWidget {
   State<ClickwheelInputScreen> createState() => _ClickwheelInputScreenState();
 }
 
-
 // --- Transaction Editor (Full editor used on Desktop) ---
 class TransactionEditorScreen extends StatefulWidget {
   final Transaction initial;
@@ -1576,16 +1758,19 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
     );
   }
 }
-
 class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   int _currentDigit = 0;
-  List<int> _inputDigits = [];
+  List<int> _inputDigits = [0, 0, 0]; // start from 100s digit by default
+  int _currentIndex = 0; // 0 => 100s, 1 => 10s, 2 => 1s, then additional lower digits if appended
   Timer? _digitConfirmationTimer;
   double _currentValue = 0.0;
+  // Flash flags for a subtle animation when a digit changes
+  List<bool> _flashFlags = [];
 
   @override
   void initState() {
     super.initState();
+    if (_currentIndex < _inputDigits.length) _currentDigit = _inputDigits[_currentIndex];
     _startDigitConfirmationTimer();
   }
 
@@ -1598,6 +1783,12 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   void _incrementDigit() {
     setState(() {
       _currentDigit = (_currentDigit + 1) % 10;
+      if (_currentIndex < _inputDigits.length) {
+        _inputDigits[_currentIndex] = _currentDigit;
+        _ensureFlashFlagsLength();
+        _triggerFlash(_currentIndex);
+      }
+      _updateCurrentValue();
       _resetDigitConfirmationTimer();
     });
   }
@@ -1605,14 +1796,30 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   void _decrementDigit() {
     setState(() {
       _currentDigit = (_currentDigit - 1 + 10) % 10;
+      if (_currentIndex < _inputDigits.length) {
+        _inputDigits[_currentIndex] = _currentDigit;
+        _ensureFlashFlagsLength();
+        _triggerFlash(_currentIndex);
+      }
+      _updateCurrentValue();
       _resetDigitConfirmationTimer();
     });
   }
 
   void _addDigit() {
     setState(() {
-      _inputDigits.add(_currentDigit);
-      _currentDigit = 0;
+      if (_currentIndex < _inputDigits.length) {
+        _inputDigits[_currentIndex] = _currentDigit;
+        _ensureFlashFlagsLength();
+        _triggerFlash(_currentIndex);
+      } else {
+        _inputDigits.add(_currentDigit);
+        _ensureFlashFlagsLength();
+        _triggerFlash(_inputDigits.length - 1);
+      }
+      _currentIndex = _currentIndex + 1;
+      if (_currentIndex >= _inputDigits.length) _inputDigits.add(0);
+      _currentDigit = _inputDigits[_currentIndex];
       _updateCurrentValue();
       _resetDigitConfirmationTimer();
     });
@@ -1621,7 +1828,18 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   void _removeLastDigit() {
     setState(() {
       if (_inputDigits.isNotEmpty) {
-        _currentDigit = _inputDigits.removeLast();
+        if (_inputDigits.length > 3) {
+          _inputDigits.removeLast();
+          if (_currentIndex >= _inputDigits.length) _currentIndex = _inputDigits.length - 1;
+          _currentDigit = _inputDigits[_currentIndex];
+          _ensureFlashFlagsLength();
+          _triggerFlash(_currentIndex);
+        } else {
+          _inputDigits[_currentIndex] = 0;
+          _currentDigit = 0;
+          _ensureFlashFlagsLength();
+          _triggerFlash(_currentIndex);
+        }
         _updateCurrentValue();
         _resetDigitConfirmationTimer();
       } else {
@@ -1631,27 +1849,40 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     });
   }
 
-  void _updateCurrentValue() {
-    String numStr = _inputDigits.map((e) => e.toString()).join();
-    if (numStr.isEmpty) {
-      _currentValue = 0.0;
-    } else {
-      _currentValue = (int.tryParse(numStr) ?? 0) / 100.0;
+  void _ensureFlashFlagsLength() {
+    while (_flashFlags.length < _inputDigits.length) _flashFlags.add(false);
+    if (_flashFlags.length > _inputDigits.length) {
+      _flashFlags = _flashFlags.sublist(0, _inputDigits.length);
     }
+  }
+
+  void _triggerFlash(int idx) {
+    _ensureFlashFlagsLength();
+    if (idx < 0 || idx >= _flashFlags.length) return;
+    setState(() {
+      _flashFlags[idx] = true;
+    });
+    Future.delayed(const Duration(milliseconds: 220), () {
+      if (!mounted) return;
+      setState(() {
+        _flashFlags[idx] = false;
+      });
+    });
+  }
+
+  void _updateCurrentValue() {
+    final numStr = _inputDigits.map((e) => e.toString()).join();
+    _currentValue = (int.tryParse(numStr) ?? 0) / 100.0;
   }
 
   void _startDigitConfirmationTimer() {
     _digitConfirmationTimer?.cancel();
     _digitConfirmationTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) {
-        _addDigit();
-      }
+      if (mounted) _addDigit();
     });
   }
 
-  void _resetDigitConfirmationTimer() {
-    _startDigitConfirmationTimer();
-  }
+  void _resetDigitConfirmationTimer() => _startDigitConfirmationTimer();
 
   @override
   Widget build(BuildContext context) {
@@ -1664,18 +1895,9 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(
-              'Input Amount:',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
+            Text('Input Amount:', style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 10),
-            Text(
-              '${_currentValue.toStringAsFixed(2)}',
-              style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-            ),
+            Text('${_currentValue.toStringAsFixed(2)}', style: Theme.of(context).textTheme.displaySmall?.copyWith(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
             const SizedBox(height: 40),
             Container(
               width: 200,
@@ -1683,70 +1905,83 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: Theme.of(context).colorScheme.surfaceVariant,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.2),
-                    blurRadius: 10,
-                    offset: const Offset(0, 5),
-                  ),
-                ],
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 10, offset: const Offset(0, 5))],
               ),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Positioned(
-                    top: 10,
-                    child: IconButton(
-                      icon: const Icon(Icons.keyboard_arrow_up, size: 50),
-                      onPressed: _incrementDigit,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+              child: GestureDetector(
+                onHorizontalDragEnd: (details) {
+                  final vx = details.velocity.pixelsPerSecond.dx;
+                  setState(() {
+                    if (vx > 100) {
+                      _currentIndex = _currentIndex + 1;
+                      if (_currentIndex >= _inputDigits.length) _inputDigits.add(0);
+                      _currentDigit = _inputDigits[_currentIndex];
+                    } else if (vx < -100) {
+                      if (_currentIndex > 0) _currentIndex = _currentIndex - 1;
+                      _currentDigit = _inputDigits[_currentIndex];
+                    }
+                    _updateCurrentValue();
+                  });
+                },
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Positioned(
+                      top: 10,
+                      child: IconButton(icon: const Icon(Icons.keyboard_arrow_up, size: 50), onPressed: _incrementDigit, color: Theme.of(context).colorScheme.onSurfaceVariant),
                     ),
-                  ),
-                  Text(
-                    '$_currentDigit',
-                    style: Theme.of(context).textTheme.displayLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: _inputDigits.asMap().entries.map((entry) {
+                            final idx = entry.key;
+                            final val = entry.value;
+                            final selected = idx == _currentIndex;
+                            // Animate digit changes with a subtle scale+opacity flash.
+                            final isFlashing = idx < _flashFlags.length && _flashFlags[idx];
+                            final baseScale = selected ? 1.05 : 1.0;
+                            final flashScale = isFlashing ? 1.18 : baseScale;
+                            return AnimatedScale(
+                              duration: const Duration(milliseconds: 220),
+                              curve: Curves.easeOut,
+                              scale: flashScale,
+                              child: AnimatedOpacity(
+                                duration: const Duration(milliseconds: 220),
+                                opacity: isFlashing ? 1.0 : (selected ? 1.0 : 0.88),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6.0),
+                                  child: Text(
+                                    val.toString(),
+                                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                                      fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                                      color: selected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurfaceVariant,
+                                      fontSize: selected ? 42 : 24,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }).toList(),
                         ),
-                  ),
-                  Positioned(
-                    bottom: 10,
-                    child: IconButton(
-                      icon: const Icon(Icons.keyboard_arrow_down, size: 50),
-                      onPressed: _decrementDigit,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        const SizedBox(height: 6),
+                        Text(_currentIndex == 0 ? '100s' : (_currentIndex == 1 ? '10s' : (_currentIndex == 2 ? '1s' : 'lower')), style: Theme.of(context).textTheme.bodySmall),
+                      ],
                     ),
-                  ),
-                ],
+                    Positioned(
+                      bottom: 10,
+                      child: IconButton(icon: const Icon(Icons.keyboard_arrow_down, size: 50), onPressed: _decrementDigit, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 40),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: _inputDigits.isNotEmpty ? _removeLastDigit : null,
-                  icon: const Icon(Icons.backspace),
-                  label: const Text('Back'),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-                  ),
-                ),
-                const SizedBox(width: 20),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).pop(_currentValue);
-                  },
-                  icon: const Icon(Icons.done),
-                  label: const Text('Done'),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                  ),
-                ),
-              ],
-            ),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              ElevatedButton.icon(onPressed: _inputDigits.isNotEmpty ? _removeLastDigit : null, icon: const Icon(Icons.backspace), label: const Text('Back'), style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15))),
+              const SizedBox(width: 20),
+              ElevatedButton.icon(onPressed: () => Navigator.of(context).pop(_currentValue), icon: const Icon(Icons.done), label: const Text('Done'), style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15), backgroundColor: Theme.of(context).colorScheme.primary, foregroundColor: Theme.of(context).colorScheme.onPrimary)),
+            ]),
           ],
         ),
       ),
