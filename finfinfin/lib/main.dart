@@ -324,35 +324,96 @@ class _BudgetAppState extends State<BudgetApp> {
   /// - A JSON array of maps (each is a transaction map).
   /// This replaces any existing transactions (old data is deleted) and persists the new set.
   Future<void> _importTransactionsFromJsonString(BuildContext ctx, String jsonString) async {
+    bool dialogShown = false;
+    final counts = ValueNotifier<Map<String, int>>({'total': 0, 'processed': 0, 'imported': 0, 'skipped': 0});
     try {
       final decoded = json.decode(jsonString);
       if (decoded is! List) throw const FormatException('Top-level JSON value must be an array');
+
+      counts.value = {...counts.value, 'total': decoded.length};
+
+      // Show a progress dialog that listens to `counts` updates.
+      dialogShown = true;
+      showDialog<void>(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (dctx) {
+          return AlertDialog(
+            title: const Text('Importing Transactions'),
+            content: ValueListenableBuilder<Map<String, int>>(
+              valueListenable: counts,
+              builder: (context, value, _) {
+                final total = value['total'] ?? 0;
+                final processed = value['processed'] ?? 0;
+                final imported = value['imported'] ?? 0;
+                final skipped = value['skipped'] ?? 0;
+                final progress = total > 0 ? processed / total : 0.0;
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    LinearProgressIndicator(value: progress),
+                    const SizedBox(height: 12),
+                    Text('Processed: $processed / $total'),
+                    Text('Imported: $imported  Skipped: $skipped'),
+                  ],
+                );
+              },
+            ),
+          );
+        },
+      );
 
       final List<String> stringList = [];
       final List<Transaction> parsed = [];
 
       for (var item in decoded) {
+        // process each item and update counts so dialog shows progress
         if (item is String) {
-          // item is already a JSON-encoded transaction string
           try {
             final map = json.decode(item) as Map<String, dynamic>;
             parsed.add(Transaction.fromJson(map));
             stringList.add(item);
+            counts.value = {
+              ...counts.value,
+              'processed': (counts.value['processed'] ?? 0) + 1,
+              'imported': (counts.value['imported'] ?? 0) + 1,
+            };
           } catch (e) {
-            // skip invalid entries
+            counts.value = {
+              ...counts.value,
+              'processed': (counts.value['processed'] ?? 0) + 1,
+              'skipped': (counts.value['skipped'] ?? 0) + 1,
+            };
             continue;
           }
-        } else if (item is Map<String, dynamic>) {
+        } else if (item is Map) {
           try {
-            parsed.add(Transaction.fromJson(item));
-            stringList.add(json.encode(item));
+            final map = Map<String, dynamic>.from(item);
+            parsed.add(Transaction.fromJson(map));
+            stringList.add(json.encode(map));
+            counts.value = {
+              ...counts.value,
+              'processed': (counts.value['processed'] ?? 0) + 1,
+              'imported': (counts.value['imported'] ?? 0) + 1,
+            };
           } catch (e) {
+            counts.value = {
+              ...counts.value,
+              'processed': (counts.value['processed'] ?? 0) + 1,
+              'skipped': (counts.value['skipped'] ?? 0) + 1,
+            };
             continue;
           }
         } else {
-          // unsupported entry type, skip
+          counts.value = {
+            ...counts.value,
+            'processed': (counts.value['processed'] ?? 0) + 1,
+            'skipped': (counts.value['skipped'] ?? 0) + 1,
+          };
           continue;
         }
+        // allow UI to update between iterations for very large lists
+        await Future<void>.delayed(const Duration(milliseconds: 1));
       }
 
       // Replace existing transactions with the new parsed list
@@ -361,13 +422,33 @@ class _BudgetAppState extends State<BudgetApp> {
       });
       await _saveTransactions();
 
+      // close the progress dialog
+      if (dialogShown && ctx.mounted) Navigator.of(ctx).pop();
+      dialogShown = false;
+
+      // Show final result
+      final importedCount = counts.value['imported'] ?? parsed.length;
+      final skippedCount = counts.value['skipped'] ?? 0;
+      if (ctx.mounted) {
+        showDialog(
+          context: ctx,
+          builder: (dctx) => AlertDialog(
+            title: const Text('Import Complete'),
+            content: Text('Imported $importedCount transactions. Skipped $skippedCount invalid entries.'),
+            actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK'))],
+          ),
+        );
+      }
       if (ctx.mounted) {
         ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-          content: Text('Imported ${_transactions.length} transactions'),
+          content: Text('Imported $importedCount transactions (skipped $skippedCount).'),
           behavior: SnackBarBehavior.floating,
         ));
       }
     } catch (e) {
+      // ensure progress dialog is closed on error
+      if (dialogShown && ctx.mounted) Navigator.of(ctx).pop();
+      dialogShown = false;
       if (ctx.mounted) {
         showDialog(
           context: ctx,
@@ -378,6 +459,8 @@ class _BudgetAppState extends State<BudgetApp> {
           ),
         );
       }
+    } finally {
+      counts.dispose();
     }
   }
 }
@@ -411,11 +494,13 @@ class Transaction {
       throw const FormatException("Missing required field in transaction JSON");
     }
     
+    // Parse date and normalize to local time so display/grouping is consistent.
+    final parsedDate = DateTime.parse(json['date'] as String).toLocal();
     return Transaction(
       amount: (json['amount'] as num).toDouble(), // Safer parsing
       type: json['type'] as String,
       category: json['category'] as String,
-      date: DateTime.parse(json['date'] as String),
+      date: parsedDate,
     );
   }
 }
@@ -1302,7 +1387,6 @@ class SettingsSheet extends StatelessWidget {
             subtitle: const Text('Paste a JSON array or provide a file path'),
             onTap: () {
               final TextEditingController pathController = TextEditingController();
-              final TextEditingController pasteController = TextEditingController();
               showDialog<void>(
                 context: context,
                 builder: (dctx) {
@@ -1318,7 +1402,7 @@ class SettingsSheet extends StatelessWidget {
                                 child: TextField(
                                   controller: pathController,
                                   decoration: const InputDecoration(
-                                    labelText: 'Optional: Path to JSON file',
+                                    labelText: 'Path to JSON file',
                                   ),
                                 ),
                               ),
@@ -1337,13 +1421,6 @@ class SettingsSheet extends StatelessWidget {
                                       final path = fp.path;
                                       if (path != null) {
                                         pathController.text = path;
-                                        try {
-                                          final file = File(path);
-                                          final content = await file.readAsString();
-                                          pasteController.text = content;
-                                        } catch (e) {
-                                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to read picked file: $e')));
-                                        }
                                       }
                                     }
                                   } catch (e) {
@@ -1354,43 +1431,31 @@ class SettingsSheet extends StatelessWidget {
                             ],
                           ),
                           const SizedBox(height: 12),
-                          TextField(
-                            controller: pasteController,
-                            decoration: const InputDecoration(
-                              labelText: 'Or paste JSON array here',
-                              alignLabelWithHint: true,
-                            ),
-                            minLines: 6,
-                            maxLines: 12,
-                          ),
+                          const SizedBox(height: 8),
+                          const Text('Select a JSON file to import. The existing transactions will be replaced.'),
                         ],
                       ),
                     ),
                     actions: [
                       TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('Cancel')),
                       TextButton(
+                        key: const Key('importDialogImportButton'),
                         onPressed: () async {
-                          String? content;
                           final path = pathController.text.trim();
-                          if (path.isNotEmpty) {
-                            try {
-                              final file = File(path);
-                              if (await file.exists()) {
-                                content = await file.readAsString();
-                              } else {
-                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
-                                return;
-                              }
-                            } catch (e) {
-                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to read file: $e')));
+                          if (path.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No file selected')));
+                            return;
+                          }
+                          String content;
+                          try {
+                            final file = File(path);
+                            if (!await file.exists()) {
+                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
                               return;
                             }
-                          } else {
-                            content = pasteController.text.trim();
-                          }
-
-                          if (content.isEmpty) {
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No JSON provided')));
+                            content = await file.readAsString();
+                          } catch (e) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to read file: $e')));
                             return;
                           }
 
