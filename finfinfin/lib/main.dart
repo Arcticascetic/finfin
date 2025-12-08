@@ -7,27 +7,40 @@ import 'package:intl/intl.dart'; // For date formatting
 import 'dart:io' show Platform, File;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:hive_flutter/hive_flutter.dart';
+import 'models/transaction.dart';
+import 'models/transactions_notifier.dart';
 
-void main() {
+void main() async {
   // Ensure the app starts with necessary bindings for date formatting
   Intl.defaultLocale = 'en_US';
+  await Hive.initFlutter();
   WidgetsFlutterBinding.ensureInitialized();
   // Wrap the app with a top-level MaterialApp to guarantee MaterialLocalizations
   // are available to any widget that may be built during initialization.
-  runApp(const MaterialApp(
-    debugShowCheckedModeBanner: false,
-    home: BudgetApp(),
-  ));
+  runApp(
+    const MaterialApp(debugShowCheckedModeBanner: false, home: BudgetApp()),
+  );
 }
 
 // --- Global Default Categories (Used only for first run) ---
 const List<String> defaultExpenseCategories = [
-  'Housing', 'Food', 'Transport', 'Utilities', 'Entertainment',
-  'Health', 'Savings', 'Other Expense'
+  'Housing',
+  'Food',
+  'Transport',
+  'Utilities',
+  'Entertainment',
+  'Health',
+  'Savings',
+  'Other Expense',
 ];
 
 const List<String> defaultIncomeCategories = [
-  'Salary', 'Investments', 'Gift', 'Rental Income', 'Other Income'
+  'Salary',
+  'Investments',
+  'Gift',
+  'Rental Income',
+  'Other Income',
 ];
 
 // Helper to determine the start and end of the current month
@@ -42,8 +55,14 @@ DateTimeRange getThisMonthRange() {
 DateTimeRange getLastMonthRange() {
   final now = DateTime.now();
   final firstDayOfCurrentMonth = DateTime(now.year, now.month, 1);
-  final lastDayOfLastMonth = firstDayOfCurrentMonth.subtract(const Duration(days: 1));
-  final firstDayOfLastMonth = DateTime(lastDayOfLastMonth.year, lastDayOfLastMonth.month, 1);
+  final lastDayOfLastMonth = firstDayOfCurrentMonth.subtract(
+    const Duration(days: 1),
+  );
+  final firstDayOfLastMonth = DateTime(
+    lastDayOfLastMonth.year,
+    lastDayOfLastMonth.month,
+    1,
+  );
   return DateTimeRange(start: firstDayOfLastMonth, end: lastDayOfLastMonth);
 }
 
@@ -66,13 +85,31 @@ class _BudgetAppState extends State<BudgetApp> {
   List<String> _incomeCategories = [];
 
   // Transaction State
-  List<Transaction> _transactions = [];
+  late TransactionsNotifier _transactionsNotifier;
+  List<Transaction> get _transactions => _transactionsNotifier.transactions;
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadSettingsAndData();
+    // Temporary empty notifier until loaded
+    // We'll init properly in _loadSettingsAndData, or better, make it nullable
+    // For now, let's just hold it.
+    // Actually, we can't make it 'late' if we access it in build before load.
+    // Let's rely on _isLoading.
+  }
+
+  @override
+  void dispose() {
+    _transactionsNotifier.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Initialize here or in initState? initState is better.
+    if (_isLoading) _loadSettingsAndData();
   }
 
   // --- Persistence & Initialization ---
@@ -87,44 +124,49 @@ class _BudgetAppState extends State<BudgetApp> {
     // 2. Load Categories (use defaults if none saved)
     final expenseStrings = prefs.getStringList('expenseCategories');
     final incomeStrings = prefs.getStringList('incomeCategories');
-    
+
     // 3. Load Transactions
+    // 3. Init Hive and Transactions
+    final box = await Hive.openBox('transactions_box');
+    _transactionsNotifier = TransactionsNotifier(box);
+    _transactionsNotifier.addListener(() {
+      setState(() {});
+    });
+
+    // Check for SharedPreferences migration
     final transactionStrings = prefs.getStringList('transactions');
+    if (transactionStrings != null) {
+      // Migrate to Hive
+      final List<Transaction> migrated = [];
+      for (var s in transactionStrings) {
+        try {
+          final map = json.decode(s) as Map<String, dynamic>;
+          migrated.add(Transaction.fromJson(map));
+        } catch (_) {}
+      }
+      // Add to notifier (which saves to Hive)
+      for (var t in migrated) {
+        await _transactionsNotifier.addTransaction(t);
+      }
+      // Clear prefs
+      await prefs.remove('transactions');
+    }
+
+    await _transactionsNotifier.loadFromHive();
 
     setState(() {
       _currencySymbol = savedCurrency ?? '\$';
       _themeMode = isDarkMode ? ThemeMode.dark : ThemeMode.light;
-      
+
       _expenseCategories = expenseStrings ?? defaultExpenseCategories;
       _incomeCategories = incomeStrings ?? defaultIncomeCategories;
 
-      if (transactionStrings != null) {
-        // --- FIX for Problem 1: Handle Corrupted Data ---
-        _transactions = transactionStrings.map((jsonString) {
-          try {
-            // Try to parse the transaction
-            final jsonMap = json.decode(jsonString) as Map<String, dynamic>;
-            return Transaction.fromJson(jsonMap);
-          } catch (e) {
-            // If it fails (corrupted data, old format, etc.), log it and skip.
-            print('Failed to load transaction: $jsonString. Error: $e');
-            return null; // Return null for the bad entry
-          }
-        }).whereType<Transaction>().toList(); // Filters out all the null (bad) entries
-        // --- End of FIX ---
-      }
       _isLoading = false;
     });
   }
 
-  Future<void> _saveTransactions() async {
-    final prefs = await SharedPreferences.getInstance();
-    final transactionStrings = _transactions.map((transaction) {
-      final jsonMap = transaction.toJson();
-      return json.encode(jsonMap);
-    }).toList();
-    await prefs.setStringList('transactions', transactionStrings);
-  }
+  // Replaced by Hive auto-save in Notifier
+  // Future<void> _saveTransactions() async ... removed
 
   Future<void> _saveCategories() async {
     final prefs = await SharedPreferences.getInstance();
@@ -145,37 +187,35 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- App Logic Methods ---
 
   void _addTransaction(double amount, String type, String category) {
-    setState(() {
-      _transactions.add(Transaction(
-          amount: amount,
-          type: type,
-          category: category,
-          date: DateTime.now()));
-      _transactions.sort((a, b) => a.date.compareTo(b.date)); // Keep sorted by date
-    });
-    _saveTransactions();
+    // Create new transaction with ID (generated by constructor)
+    final t = Transaction(
+      amount: amount,
+      type: type,
+      category: category,
+      date: DateTime.now(),
+    );
+    _transactionsNotifier.addTransaction(t);
   }
 
   void _removeTransaction(Transaction transactionToRemove) {
-    setState(() {
-      _transactions.remove(transactionToRemove);
-    });
-    _saveTransactions();
+    _transactionsNotifier.removeTransaction(transactionToRemove);
   }
 
   /// Replace an existing transaction with an updated one.
   /// This supports editing amount, type, and category.
-  void _updateTransaction(Transaction oldTransaction, Transaction newTransaction) {
-    final idx = _transactions.indexWhere((t) =>
-        t.date == oldTransaction.date &&
-        t.type == oldTransaction.type &&
-        t.category == oldTransaction.category &&
-        t.amount == oldTransaction.amount);
+  void _updateTransaction(
+    Transaction oldTransaction,
+    Transaction newTransaction,
+  ) {
+    final idx = _transactions.indexWhere(
+      (t) =>
+          t.date == oldTransaction.date &&
+          t.type == oldTransaction.type &&
+          t.category == oldTransaction.category &&
+          t.amount == oldTransaction.amount,
+    );
     if (idx != -1) {
-      setState(() {
-        _transactions[idx] = newTransaction;
-      });
-      _saveTransactions();
+      _transactionsNotifier.updateTransaction(oldTransaction, newTransaction);
     }
   }
 
@@ -218,8 +258,14 @@ class _BudgetAppState extends State<BudgetApp> {
     }
     // Filter logic: includes transactions from start date up to the end of the end date
     return _transactions.where((t) {
-      final isAfterStart = t.date.isAfter(_filterRange!.start.subtract(const Duration(microseconds: 1)));
-      final isBeforeEnd = t.date.isBefore(_filterRange!.end.add(const Duration(days: 1)).subtract(const Duration(microseconds: 1)));
+      final isAfterStart = t.date.isAfter(
+        _filterRange!.start.subtract(const Duration(microseconds: 1)),
+      );
+      final isBeforeEnd = t.date.isBefore(
+        _filterRange!.end
+            .add(const Duration(days: 1))
+            .subtract(const Duration(microseconds: 1)),
+      );
       return isAfterStart && isBeforeEnd;
     }).toList();
   }
@@ -227,27 +273,22 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- Build Method ---
   @override
   Widget build(BuildContext context) {
-    
     const Color primaryBlue = Color(0xFF00BCD4);
 
     return MaterialApp(
       title: 'Clickwheel Budget App',
-      theme: ThemeData(
+      theme: ThemeData.from(
         colorScheme: ColorScheme.fromSeed(
           seedColor: primaryBlue,
           brightness: Brightness.light,
         ),
         useMaterial3: true,
       ),
-      darkTheme: ThemeData.dark().copyWith(
+      darkTheme: ThemeData.from(
         colorScheme: ColorScheme.fromSeed(
           seedColor: primaryBlue,
           brightness: Brightness.dark,
-        ).copyWith(
-          background: const Color(0xFF0A192F),
-          surface: const Color(0xFF102A43),
-          primary: primaryBlue,
-        ),
+        ).copyWith(surface: const Color(0xFF102A43), primary: primaryBlue),
         useMaterial3: true,
       ),
       themeMode: _themeMode,
@@ -265,8 +306,8 @@ class _BudgetAppState extends State<BudgetApp> {
             ],
             bottom: const TabBar(
               tabs: [
-                const Tab(icon: Icon(Icons.list_alt), text: 'Transactions'),
-                const Tab(icon: Icon(Icons.show_chart), text: 'Charts'),
+                Tab(icon: Icon(Icons.list_alt), text: 'Transactions'),
+                Tab(icon: Icon(Icons.show_chart), text: 'Charts'),
               ],
             ),
           ),
@@ -277,11 +318,11 @@ class _BudgetAppState extends State<BudgetApp> {
                     // --- Tab 1: Home Screen ---
                     HomeScreen(
                       transactions: _filteredTransactions,
-                      allTransactions: _transactions, 
+                      allTransactions: _transactions,
                       currencySymbol: _currencySymbol,
                       filterRange: _filterRange,
-                        expenseCategories: _expenseCategories,
-                        incomeCategories: _incomeCategories,
+                      expenseCategories: _expenseCategories,
+                      incomeCategories: _incomeCategories,
                       onAddTransaction: _addTransaction,
                       onRemoveTransaction: _removeTransaction,
                       onEditTransaction: _updateTransaction,
@@ -289,8 +330,10 @@ class _BudgetAppState extends State<BudgetApp> {
                     ),
                     // --- Tab 2: Chart Screen ---
                     ChartScreen(
-                        transactions: _filteredTransactions,
-                        currencySymbol: _currencySymbol),
+                      transactions: _filteredTransactions,
+                      allTransactions: _transactions,
+                      currencySymbol: _currencySymbol,
+                    ),
                   ],
                 ),
         ),
@@ -307,13 +350,14 @@ class _BudgetAppState extends State<BudgetApp> {
         return SettingsSheet(
           themeMode: _themeMode,
           currencySymbol: _currencySymbol,
-          expenseCategories: _expenseCategories, 
+          expenseCategories: _expenseCategories,
           incomeCategories: _incomeCategories,
           allTransactions: _transactions, // Pass the full list for checking
           onUpdateTheme: _updateThemeMode,
           onUpdateCurrency: _updateCurrency,
-          onUpdateCategories: _updateCategories, 
-          onImportTransactions: (jsonString) => _importTransactionsFromJsonString(ctx, jsonString),
+          onUpdateCategories: _updateCategories,
+          onImportTransactions: (jsonString) =>
+              _importTransactionsFromJsonString(ctx, jsonString),
         );
       },
     );
@@ -323,12 +367,21 @@ class _BudgetAppState extends State<BudgetApp> {
   /// - A JSON array of strings (each string is a JSON-encoded transaction map), or
   /// - A JSON array of maps (each is a transaction map).
   /// This replaces any existing transactions (old data is deleted) and persists the new set.
-  Future<void> _importTransactionsFromJsonString(BuildContext ctx, String jsonString) async {
+  Future<void> _importTransactionsFromJsonString(
+    BuildContext ctx,
+    String jsonString,
+  ) async {
     bool dialogShown = false;
-    final counts = ValueNotifier<Map<String, int>>({'total': 0, 'processed': 0, 'imported': 0, 'skipped': 0});
+    final counts = ValueNotifier<Map<String, int>>({
+      'total': 0,
+      'processed': 0,
+      'imported': 0,
+      'skipped': 0,
+    });
     try {
       final decoded = json.decode(jsonString);
-      if (decoded is! List) throw const FormatException('Top-level JSON value must be an array');
+      if (decoded is! List)
+        throw const FormatException('Top-level JSON value must be an array');
 
       counts.value = {...counts.value, 'total': decoded.length};
 
@@ -417,33 +470,43 @@ class _BudgetAppState extends State<BudgetApp> {
       }
 
       // Replace existing transactions with the new parsed list
-      setState(() {
-        _transactions = parsed;
-      });
-      await _saveTransactions();
+      // Replace existing transactions with the new parsed list
+      // Use notifier import
+      await _transactionsNotifier.importFromDecodedList(decoded, counts);
 
       // close the progress dialog
       if (dialogShown && ctx.mounted) Navigator.of(ctx).pop();
       dialogShown = false;
 
       // Show final result
-      final importedCount = counts.value['imported'] ?? parsed.length;
+      final importedCount = counts.value['imported'] ?? 0;
       final skippedCount = counts.value['skipped'] ?? 0;
       if (ctx.mounted) {
         showDialog(
           context: ctx,
           builder: (dctx) => AlertDialog(
             title: const Text('Import Complete'),
-            content: Text('Imported $importedCount transactions. Skipped $skippedCount invalid entries.'),
-            actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK'))],
+            content: Text(
+              'Imported $importedCount transactions. Skipped $skippedCount invalid entries.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       }
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-          content: Text('Imported $importedCount transactions (skipped $skippedCount).'),
-          behavior: SnackBarBehavior.floating,
-        ));
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Imported $importedCount transactions (skipped $skippedCount).',
+            ),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
     } catch (e) {
       // ensure progress dialog is closed on error
@@ -455,7 +518,12 @@ class _BudgetAppState extends State<BudgetApp> {
           builder: (dctx) => AlertDialog(
             title: const Text('Import Failed'),
             content: Text('Failed to parse the provided JSON: $e'),
-            actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('OK'))],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       }
@@ -466,44 +534,7 @@ class _BudgetAppState extends State<BudgetApp> {
 }
 
 // --- Transaction Data Model ---
-class Transaction {
-  final double amount;
-  final String type; // 'income' or 'expense'
-  final String category;
-  final DateTime date;
-
-  Transaction(
-      {required this.amount,
-      required this.type,
-      required this.category,
-      required this.date});
-
-  Map<String, dynamic> toJson() => {
-        'amount': amount,
-        'type': type,
-        'category': category,
-        'date': date.toIso8601String(),
-      };
-
-  factory Transaction.fromJson(Map<String, dynamic> json) {
-    // Add checks to ensure data integrity
-    if (json['amount'] == null ||
-        json['type'] == null ||
-        json['category'] == null ||
-        json['date'] == null) {
-      throw const FormatException("Missing required field in transaction JSON");
-    }
-    
-    // Parse date and normalize to local time so display/grouping is consistent.
-    final parsedDate = DateTime.parse(json['date'] as String).toLocal();
-    return Transaction(
-      amount: (json['amount'] as num).toDouble(), // Safer parsing
-      type: json['type'] as String,
-      category: json['category'] as String,
-      date: parsedDate,
-    );
-  }
-}
+// Transaction class moved to models/transaction.dart
 
 // --- Category Selection Screen ---
 class CategorySelectionScreen extends StatelessWidget {
@@ -511,18 +542,26 @@ class CategorySelectionScreen extends StatelessWidget {
   final List<String> categories;
   final Function(double, String, String) onConfirmTransaction;
 
-  const CategorySelectionScreen(
-      {super.key, required this.type, required this.categories, required this.onConfirmTransaction});
+  const CategorySelectionScreen({
+    super.key,
+    required this.type,
+    required this.categories,
+    required this.onConfirmTransaction,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('${type == 'expense' ? 'Select Expense' : 'Select Income'} Category'),
+        title: Text(
+          '${type == 'expense' ? 'Select Expense' : 'Select Income'} Category',
+        ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
       ),
       body: categories.isEmpty
-          ? const Center(child: Text('No categories defined. Add them in Settings.'))
+          ? const Center(
+              child: Text('No categories defined. Add them in Settings.'),
+            )
           : GridView.builder(
               padding: const EdgeInsets.all(16.0),
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -552,15 +591,24 @@ class CategorySelectionScreen extends StatelessWidget {
                     if (context.mounted) Navigator.of(context).pop();
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
-                    foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+                    backgroundColor: Theme.of(
+                      context,
+                    ).colorScheme.surfaceContainerHighest,
+                    foregroundColor: Theme.of(
+                      context,
+                    ).colorScheme.onSurfaceVariant,
                     elevation: 4,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   child: Text(
                     category,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 );
               },
@@ -634,7 +682,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final sb = StringBuffer();
     sb.write(txns.length);
     for (var t in txns) {
-      sb.write('|${t.date.millisecondsSinceEpoch}:${t.amount}:${t.type}:${t.category}');
+      sb.write(
+        '|${t.date.millisecondsSinceEpoch}:${t.amount}:${t.type}:${t.category}',
+      );
     }
     return sb.toString();
   }
@@ -675,7 +725,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // Group transactions into a map: year -> month -> list
-  Map<int, Map<int, List<Transaction>>> _groupByYearMonth(List<Transaction> txns) {
+  Map<int, Map<int, List<Transaction>>> _groupByYearMonth(
+    List<Transaction> txns,
+  ) {
     final Map<int, Map<int, List<Transaction>>> result = {};
     for (var t in txns) {
       final y = t.date.year;
@@ -694,8 +746,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // Show the same transaction menu used before; extracted to instance method so it has access to widget callbacks.
-  void _showTransactionMenu(BuildContext ctx, Offset globalPosition, Transaction transaction) async {
-    final RenderBox overlay = Overlay.of(ctx).context.findRenderObject() as RenderBox;
+  void _showTransactionMenu(
+    BuildContext ctx,
+    Offset globalPosition,
+    Transaction transaction,
+  ) async {
+    final RenderBox overlay =
+        Overlay.of(ctx).context.findRenderObject() as RenderBox;
     final selected = await showMenu<String>(
       context: ctx,
       position: RelativeRect.fromRect(
@@ -713,16 +770,26 @@ class _HomeScreenState extends State<HomeScreen> {
         context: ctx,
         builder: (dctx) => AlertDialog(
           title: const Text('Delete Transaction?'),
-          content: const Text('Are you sure you want to delete this transaction?'),
+          content: const Text(
+            'Are you sure you want to delete this transaction?',
+          ),
           actions: [
-            TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: const Text('Delete', style: TextStyle(color: Colors.red))),
+            TextButton(
+              onPressed: () => Navigator.of(dctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dctx).pop(true),
+              child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            ),
           ],
         ),
       );
       if (confirm == true) widget.onRemoveTransaction(transaction);
     } else if (selected == 'edit') {
-      final bool isDesktop = !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
+      final bool isDesktop =
+          !kIsWeb &&
+          (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
       if (isDesktop) {
         final edited = await Navigator.of(ctx).push<Transaction>(
           MaterialPageRoute(
@@ -737,15 +804,21 @@ class _HomeScreenState extends State<HomeScreen> {
         if (edited != null) {
           widget.onEditTransaction(transaction, edited);
           if (ctx.mounted) {
-            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-              content: Text('Transaction updated: ${widget.currencySymbol}${edited.amount.toStringAsFixed(2)}'),
-              behavior: SnackBarBehavior.floating,
-            ));
+            ScaffoldMessenger.of(ctx).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Transaction updated: ${widget.currencySymbol}${edited.amount.toStringAsFixed(2)}',
+                ),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
           }
         }
       } else {
         final amount = await Navigator.of(ctx).push<double>(
-          MaterialPageRoute(builder: (rctx) => ClickwheelInputScreen(title: 'Edit Amount')),
+          MaterialPageRoute(
+            builder: (rctx) => ClickwheelInputScreen(title: 'Edit Amount'),
+          ),
         );
         if (amount != null) {
           final updated = Transaction(
@@ -756,10 +829,14 @@ class _HomeScreenState extends State<HomeScreen> {
           );
           widget.onEditTransaction(transaction, updated);
           if (ctx.mounted) {
-            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-              content: Text('Transaction updated: ${widget.currencySymbol}${updated.amount.toStringAsFixed(2)}'),
-              behavior: SnackBarBehavior.floating,
-            ));
+            ScaffoldMessenger.of(ctx).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Transaction updated: ${widget.currencySymbol}${updated.amount.toStringAsFixed(2)}',
+                ),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
           }
         }
       }
@@ -775,8 +852,8 @@ class _HomeScreenState extends State<HomeScreen> {
       return sum - item.amount;
     });
 
-  // Use cached grouping when available to improve performance on large lists.
-  final grouped = _cachedGrouped ?? _groupByYearMonth(transactions);
+    // Use cached grouping when available to improve performance on large lists.
+    final grouped = _cachedGrouped ?? _groupByYearMonth(transactions);
     // Sort years descending
     final years = grouped.keys.toList()..sort((a, b) => b.compareTo(a));
 
@@ -788,19 +865,31 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Showing Data For:', style: Theme.of(context).textTheme.bodyLarge),
+              Text(
+                'Showing Data For:',
+                style: Theme.of(context).textTheme.bodyLarge,
+              ),
               DropdownButton<DateTimeRange?>(
                 value: widget.filterRange,
-                onChanged: (DateTimeRange? newRange) => widget.onUpdateFilter(newRange),
+                onChanged: (DateTimeRange? newRange) =>
+                    widget.onUpdateFilter(newRange),
                 items: [
                   const DropdownMenuItem(value: null, child: Text('All Time')),
-                  DropdownMenuItem(value: getThisMonthRange(), child: const Text('This Month')),
-                  DropdownMenuItem(value: getLastMonthRange(), child: const Text('Last Month')),
+                  DropdownMenuItem(
+                    value: getThisMonthRange(),
+                    child: const Text('This Month'),
+                  ),
+                  DropdownMenuItem(
+                    value: getLastMonthRange(),
+                    child: const Text('Last Month'),
+                  ),
                 ],
               ),
               TextButton.icon(
                 icon: const Icon(Icons.calendar_today, size: 18),
-                label: Text(widget.filterRange == null ? 'Custom...' : _filterText),
+                label: Text(
+                  widget.filterRange == null ? 'Custom...' : _filterText,
+                ),
                 onPressed: () => _pickDateRange(context),
               ),
             ],
@@ -811,20 +900,25 @@ class _HomeScreenState extends State<HomeScreen> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
           child: Card(
-            color: Theme.of(context).colorScheme.surfaceVariant,
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
             elevation: 4,
             child: Padding(
               padding: const EdgeInsets.all(20.0),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Total Balance:', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'Total Balance:',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
                   Text(
                     '${widget.currencySymbol}${totalBalance.toStringAsFixed(2)}',
                     style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
-                      color: totalBalance >= 0 ? Colors.green[700] : Colors.red[700],
+                      color: totalBalance >= 0
+                          ? Colors.green[700]
+                          : Colors.red[700],
                     ),
                   ),
                 ],
@@ -848,7 +942,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   itemBuilder: (context, yi) {
                     final year = years[yi];
                     final monthsMap = grouped[year]!;
-                    final months = monthsMap.keys.toList()..sort((a, b) => b.compareTo(a));
+                    final months = monthsMap.keys.toList()
+                      ..sort((a, b) => b.compareTo(a));
 
                     // Year total
                     double yearTotal = 0;
@@ -861,70 +956,157 @@ class _HomeScreenState extends State<HomeScreen> {
                     final yearExpanded = _expandedYears.contains(year);
 
                     return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
                       child: ExpansionTile(
                         key: ValueKey('year-$year'),
                         initiallyExpanded: yearExpanded,
-                        title: Text('$year', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                        trailing: Text('${widget.currencySymbol}${yearTotal.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        title: Text(
+                          '$year',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                          ),
+                        ),
+                        trailing: Text(
+                          '${widget.currencySymbol}${yearTotal.toStringAsFixed(2)}',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
                         onExpansionChanged: (open) => setState(() {
-                          if (open) _expandedYears.add(year); else _expandedYears.remove(year);
+                          if (open) {
+                            _expandedYears.add(year);
+                          } else {
+                            _expandedYears.remove(year);
+                          }
                         }),
                         children: months.map((month) {
                           final monthKey = '$year-$month';
                           final txns = monthsMap[month]!;
                           // Month total
-                          double monthTotal = txns.fold(0.0, (s, t) => s + (t.type == 'income' ? t.amount : -t.amount));
+                          double monthTotal = txns.fold(
+                            0.0,
+                            (s, t) =>
+                                s + (t.type == 'income' ? t.amount : -t.amount),
+                          );
 
-                          final monthExpanded = _expandedMonths.contains(monthKey);
-                          final monthName = DateFormat('MMMM').format(DateTime(year, month));
+                          final monthExpanded = _expandedMonths.contains(
+                            monthKey,
+                          );
+                          final monthName = DateFormat(
+                            'MMMM',
+                          ).format(DateTime(year, month));
 
                           return Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8.0,
+                            ),
                             child: ExpansionTile(
                               key: ValueKey('month-$monthKey'),
                               title: Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
-                                  Text('$monthName', style: const TextStyle(fontWeight: FontWeight.w600)),
-                                  Text('${txns.length} items', style: const TextStyle(color: Colors.grey)),
+                                  Text(
+                                    monthName,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${txns.length} items',
+                                    style: const TextStyle(color: Colors.grey),
+                                  ),
                                 ],
                               ),
-                              subtitle: Text('${widget.currencySymbol}${monthTotal.toStringAsFixed(2)}'),
+                              subtitle: Text(
+                                '${widget.currencySymbol}${monthTotal.toStringAsFixed(2)}',
+                              ),
                               initiallyExpanded: monthExpanded,
                               onExpansionChanged: (open) => setState(() {
-                                if (open) _expandedMonths.add(monthKey); else _expandedMonths.remove(monthKey);
+                                if (open) {
+                                  _expandedMonths.add(monthKey);
+                                } else {
+                                  _expandedMonths.remove(monthKey);
+                                }
                               }),
                               children: txns.reversed.map((transaction) {
-                                final sign = transaction.type == 'income' ? '+' : '-';
-                                final color = transaction.type == 'income' ? Colors.green : Colors.red;
+                                final sign = transaction.type == 'income'
+                                    ? '+'
+                                    : '-';
+                                final color = transaction.type == 'income'
+                                    ? Colors.green
+                                    : Colors.red;
 
                                 return Dismissible(
-                                  key: ValueKey(transaction.date.toIso8601String() + transaction.amount.toString()),
+                                  key: ValueKey(
+                                    transaction.date.toIso8601String() +
+                                        transaction.amount.toString(),
+                                  ),
                                   direction: DismissDirection.horizontal,
                                   background: Container(
                                     color: Colors.redAccent,
                                     alignment: Alignment.centerLeft,
                                     padding: const EdgeInsets.only(left: 20),
-                                    child: const Icon(Icons.delete, color: Colors.white),
+                                    child: const Icon(
+                                      Icons.delete,
+                                      color: Colors.white,
+                                    ),
                                   ),
                                   secondaryBackground: Container(
                                     color: Colors.redAccent,
                                     alignment: Alignment.centerRight,
                                     padding: const EdgeInsets.only(right: 20),
-                                    child: const Icon(Icons.delete, color: Colors.white),
+                                    child: const Icon(
+                                      Icons.delete,
+                                      color: Colors.white,
+                                    ),
                                   ),
-                                  onDismissed: (_) => widget.onRemoveTransaction(transaction),
+                                  onDismissed: (_) =>
+                                      widget.onRemoveTransaction(transaction),
                                   child: Card(
-                                    margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 6,
+                                    ),
                                     child: GestureDetector(
-                                      onLongPressStart: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
-                                      onSecondaryTapDown: (details) => _showTransactionMenu(context, details.globalPosition, transaction),
+                                      onLongPressStart: (details) =>
+                                          _showTransactionMenu(
+                                            context,
+                                            details.globalPosition,
+                                            transaction,
+                                          ),
+                                      onSecondaryTapDown: (details) =>
+                                          _showTransactionMenu(
+                                            context,
+                                            details.globalPosition,
+                                            transaction,
+                                          ),
                                       child: ListTile(
-                                        leading: Icon(transaction.type == 'income' ? Icons.arrow_circle_up : Icons.arrow_circle_down, color: color),
-                                        title: Text(transaction.category, style: const TextStyle(fontWeight: FontWeight.bold)),
-                                        subtitle: Text('${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}'),
-                                        trailing: Text('$sign ${widget.currencySymbol}${transaction.amount.toStringAsFixed(2)}', style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16)),
+                                        leading: Icon(
+                                          transaction.type == 'income'
+                                              ? Icons.arrow_circle_up
+                                              : Icons.arrow_circle_down,
+                                          color: color,
+                                        ),
+                                        title: Text(
+                                          transaction.category,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          '${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}',
+                                        ),
+                                        trailing: Text(
+                                          '$sign ${widget.currencySymbol}${transaction.amount.toStringAsFixed(2)}',
+                                          style: TextStyle(
+                                            color: color,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 16,
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -998,14 +1180,82 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// --- ChartScreen with Pie Chart (No changes) ---
-class ChartScreen extends StatelessWidget {
-  final List<Transaction> transactions;
+// --- ChartScreen with duration selector ---
+class ChartScreen extends StatefulWidget {
+  final List<Transaction> transactions; // provided (may be filtered)
+  final List<Transaction>?
+  allTransactions; // optional full list for re-filtering
   final String currencySymbol;
-  const ChartScreen({super.key, required this.transactions, required this.currencySymbol});
+  const ChartScreen({
+    super.key,
+    required this.transactions,
+    required this.currencySymbol,
+    this.allTransactions,
+  });
+
+  @override
+  State<ChartScreen> createState() => _ChartScreenState();
+}
+
+enum ChartDurationOption { last7, lastMonth, last90, ytd, allTime, custom }
+
+class _ChartScreenState extends State<ChartScreen> {
+  late ChartDurationOption _selectedOption;
+  DateTimeRange? _selectedRange;
+
+  @override
+  void initState() {
+    super.initState();
+    // Default to last month
+    _selectedOption = ChartDurationOption.lastMonth;
+    _selectedRange = getLastMonthRange();
+  }
+
+  Future<void> _pickCustomRange() async {
+    final source = widget.allTransactions ?? widget.transactions;
+    final firstDate = source.isNotEmpty
+        ? source.first.date
+        : DateTime.now().subtract(const Duration(days: 365));
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: firstDate,
+      lastDate: DateTime.now().add(const Duration(days: 30)),
+      initialDateRange: _selectedRange,
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        _selectedRange = picked;
+        _selectedOption = ChartDurationOption.custom;
+      });
+    }
+  }
+
+  DateTimeRange? _rangeForOption(ChartDurationOption opt) {
+    final now = DateTime.now();
+    switch (opt) {
+      case ChartDurationOption.last7:
+        return DateTimeRange(
+          start: now.subtract(const Duration(days: 7)),
+          end: now,
+        );
+      case ChartDurationOption.lastMonth:
+        return getLastMonthRange();
+      case ChartDurationOption.last90:
+        return DateTimeRange(
+          start: now.subtract(const Duration(days: 90)),
+          end: now,
+        );
+      case ChartDurationOption.ytd:
+        return DateTimeRange(start: DateTime(now.year, 1, 1), end: now);
+      case ChartDurationOption.allTime:
+        return null;
+      case ChartDurationOption.custom:
+        return _selectedRange;
+    }
+  }
 
   // Helper to generate data for the wealth line chart
-  List<FlSpot> _getWealthData() {
+  List<FlSpot> _getWealthData(List<Transaction> transactions) {
     final List<FlSpot> data = [];
     double runningTotal = 0.0;
 
@@ -1027,36 +1277,62 @@ class ChartScreen extends StatelessWidget {
   Map<String, double> getExpenseCategoryTotals(List<Transaction> txns) {
     final Map<String, double> totals = {};
     for (var txn in txns.where((t) => t.type == 'expense')) {
-      totals.update(txn.category, (value) => value + txn.amount,
-          ifAbsent: () => txn.amount);
+      totals.update(
+        txn.category,
+        (value) => value + txn.amount,
+        ifAbsent: () => txn.amount,
+      );
     }
     return totals;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (transactions.isEmpty) {
+    final source = widget.allTransactions ?? widget.transactions;
+    final activeRange = _rangeForOption(_selectedOption);
+    final txs = (activeRange == null)
+        ? source
+        : source.where((t) {
+            final isAfterStart = t.date.isAfter(
+              activeRange.start.subtract(const Duration(microseconds: 1)),
+            );
+            final isBeforeEnd = t.date.isBefore(
+              activeRange.end
+                  .add(const Duration(days: 1))
+                  .subtract(const Duration(microseconds: 1)),
+            );
+            return isAfterStart && isBeforeEnd;
+          }).toList();
+
+    if (txs.isEmpty) {
       return const Center(
         child: Text(
-          'No data to plot in this period.\nChange the filter or add transactions.',
+          'No data to plot in this period.\nChange the duration or add transactions.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 18, color: Colors.grey),
         ),
       );
     }
 
-    final double totalIncome = transactions
+    final double totalIncome = txs
         .where((t) => t.type == 'income')
         .fold(0.0, (sum, t) => sum + t.amount);
-    final double totalExpense = transactions
+    final double totalExpense = txs
         .where((t) => t.type == 'expense')
         .fold(0.0, (sum, t) => sum + t.amount);
-    final expenseCategoryTotals = getExpenseCategoryTotals(transactions);
-    final wealthData = _getWealthData();
+    final expenseCategoryTotals = getExpenseCategoryTotals(txs);
+    final wealthData = _getWealthData(txs);
     // Add checks for empty lists before reduce
-    final maxY = wealthData.isEmpty ? 0 : wealthData.map((e) => e.y).reduce((a, b) => a > b ? a : b);
-    final minY = wealthData.isEmpty ? 0 : wealthData.map((e) => e.y).reduce((a, b) => a < b ? a : b);
-    final totalMaxY = [totalIncome, totalExpense].reduce((a, b) => a > b ? a : b);
+    final maxY = wealthData.isEmpty
+        ? 0
+        : wealthData.map((e) => e.y).reduce((a, b) => a > b ? a : b);
+    final minY = wealthData.isEmpty
+        ? 0
+        : wealthData.map((e) => e.y).reduce((a, b) => a < b ? a : b);
+    final totalMaxY = [
+      totalIncome,
+      totalExpense,
+    ].reduce((a, b) => a > b ? a : b);
     final totalExpenseAmount = totalExpense;
 
     return SingleChildScrollView(
@@ -1064,14 +1340,71 @@ class ChartScreen extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Duration selector
+          Row(
+            children: [
+              const Text('Duration:'),
+              const SizedBox(width: 8),
+              DropdownButton<ChartDurationOption>(
+                value: _selectedOption,
+                onChanged: (opt) async {
+                  if (opt == null) return;
+                  if (opt == ChartDurationOption.custom) {
+                    await _pickCustomRange();
+                  } else {
+                    setState(() {
+                      _selectedOption = opt;
+                      _selectedRange = _rangeForOption(opt);
+                    });
+                  }
+                },
+                items: const [
+                  DropdownMenuItem(
+                    value: ChartDurationOption.last7,
+                    child: Text('Last 7 days'),
+                  ),
+                  DropdownMenuItem(
+                    value: ChartDurationOption.lastMonth,
+                    child: Text('Last month'),
+                  ),
+                  DropdownMenuItem(
+                    value: ChartDurationOption.last90,
+                    child: Text('Last 90 days'),
+                  ),
+                  DropdownMenuItem(
+                    value: ChartDurationOption.ytd,
+                    child: Text('Year-to-date'),
+                  ),
+                  DropdownMenuItem(
+                    value: ChartDurationOption.allTime,
+                    child: Text('All time'),
+                  ),
+                  DropdownMenuItem(
+                    value: ChartDurationOption.custom,
+                    child: Text('Custom...'),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              if (activeRange != null)
+                Text(
+                  '${DateFormat.yMMMd().format(activeRange.start)} - ${DateFormat.yMMMd().format(activeRange.end)}',
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
           // --- Pie Chart: Expense Breakdown by Category ---
           Text(
-            'Expense Breakdown ($currencySymbol${totalExpenseAmount.toStringAsFixed(2)})',
+            'Expense Breakdown (${widget.currencySymbol}${totalExpenseAmount.toStringAsFixed(2)})',
             style: Theme.of(context).textTheme.headlineSmall,
           ),
           const SizedBox(height: 16),
           _buildExpensePieChart(
-              context, expenseCategoryTotals, totalExpenseAmount),
+            context,
+            expenseCategoryTotals,
+            totalExpenseAmount,
+          ),
           const SizedBox(height: 32),
 
           // --- Line Chart: Wealth Over Time ---
@@ -1080,7 +1413,13 @@ class ChartScreen extends StatelessWidget {
             style: Theme.of(context).textTheme.headlineSmall,
           ),
           const SizedBox(height: 16),
-          _buildLineChart(context, wealthData, currencySymbol, minY.toDouble(), maxY.toDouble()),
+          _buildLineChart(
+            context,
+            wealthData,
+            widget.currencySymbol,
+            minY.toDouble(),
+            maxY.toDouble(),
+          ),
           const SizedBox(height: 32),
 
           // --- Bar Chart: Total Income vs Expense ---
@@ -1090,20 +1429,29 @@ class ChartScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           _buildBarChart(
-              context, totalIncome, totalExpense, currencySymbol, totalMaxY),
+            context,
+            totalIncome,
+            totalExpense,
+            widget.currencySymbol,
+            totalMaxY,
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildExpensePieChart(BuildContext context,
-      Map<String, double> totals, double totalAmount) {
+  Widget _buildExpensePieChart(
+    BuildContext context,
+    Map<String, double> totals,
+    double totalAmount,
+  ) {
     if (totalAmount == 0) {
       return const Center(
-          child: Padding(
-        padding: EdgeInsets.all(30.0),
-        child: Text('No expenses in this period.'),
-      ));
+        child: Padding(
+          padding: EdgeInsets.all(30.0),
+          child: Text('No expenses in this period.'),
+        ),
+      );
     }
 
     final pieData = totals.entries.toList().asMap().entries.map((entry) {
@@ -1118,12 +1466,16 @@ class ChartScreen extends StatelessWidget {
         title: '${percentage.toStringAsFixed(1)}%',
         radius: 100,
         titleStyle: const TextStyle(
-            fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white),
+          fontSize: 14,
+          fontWeight: FontWeight.bold,
+          color: Colors.white,
+        ),
         badgeWidget: Text(
           data.key,
           style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: Theme.of(context).colorScheme.onBackground),
+            fontWeight: FontWeight.bold,
+            color: Theme.of(context).colorScheme.onSurface,
+          ),
         ),
         badgePositionPercentageOffset: 1.05,
       );
@@ -1134,7 +1486,9 @@ class ChartScreen extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withAlpha((0.3 * 255).round()),
       ),
       child: PieChart(
         PieChartData(
@@ -1147,14 +1501,21 @@ class ChartScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildLineChart(BuildContext context, List<FlSpot> wealthData,
-      String currencySymbol, double minY, double maxY) {
+  Widget _buildLineChart(
+    BuildContext context,
+    List<FlSpot> wealthData,
+    String currencySymbol,
+    double minY,
+    double maxY,
+  ) {
     return Container(
       height: 300,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withAlpha((0.3 * 255).round()),
       ),
       child: LineChart(
         LineChartData(
@@ -1168,32 +1529,48 @@ class ChartScreen extends StatelessWidget {
                   // axisSide: meta.axisSide, // <--- FIX: REMOVED THIS LINE
                   meta: meta,
                   child: Text(
-                      '$currencySymbol${value.toStringAsFixed(0)}',
-                      style: const TextStyle(fontSize: 10)),
+                    '$currencySymbol${value.toStringAsFixed(0)}',
+                    style: const TextStyle(fontSize: 10),
+                  ),
                 ),
               ),
             ),
-            bottomTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            bottomTitles: const AxisTitles(
+              sideTitles: SideTitles(showTitles: false),
+            ),
+            topTitles: const AxisTitles(
+              sideTitles: SideTitles(showTitles: false),
+            ),
+            rightTitles: const AxisTitles(
+              sideTitles: SideTitles(showTitles: false),
+            ),
           ),
           borderData: FlBorderData(
             show: true,
             border: Border.all(
-                color: Theme.of(context).colorScheme.outline.withOpacity(0.5)),
+              color: Theme.of(
+                context,
+              ).colorScheme.outline.withAlpha((0.5 * 255).round()),
+            ),
           ),
           minY: minY < 0 ? minY * 1.1 : 0,
-          maxY: (maxY == 0 && minY == 0) ? 100 : maxY * 1.1, // Handle case where max is 0
+          maxY: (maxY == 0 && minY == 0)
+              ? 100
+              : maxY * 1.1, // Handle case where max is 0
           lineBarsData: [
             LineChartBarData(
-              spots: wealthData.isEmpty ? [const FlSpot(0, 0)] : wealthData, // Handle empty data
+              spots: wealthData.isEmpty
+                  ? [const FlSpot(0, 0)]
+                  : wealthData, // Handle empty data
               isCurved: true,
               color: Theme.of(context).colorScheme.primary,
               barWidth: 4,
               isStrokeCapRound: true,
               belowBarData: BarAreaData(
                 show: true,
-                color: Theme.of(context).colorScheme.primary.withOpacity(0.2),
+                color: Theme.of(
+                  context,
+                ).colorScheme.primary.withAlpha((0.2 * 255).round()),
               ),
             ),
           ],
@@ -1202,14 +1579,21 @@ class ChartScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildBarChart(BuildContext context, double totalIncome,
-      double totalExpense, String currencySymbol, double totalMaxY) {
+  Widget _buildBarChart(
+    BuildContext context,
+    double totalIncome,
+    double totalExpense,
+    String currencySymbol,
+    double totalMaxY,
+  ) {
     return Container(
       height: 300,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withAlpha((0.3 * 255).round()),
       ),
       child: BarChart(
         BarChartData(
@@ -1218,7 +1602,10 @@ class ChartScreen extends StatelessWidget {
           borderData: FlBorderData(
             show: true,
             border: Border.all(
-                color: Theme.of(context).colorScheme.outline.withOpacity(0.5)),
+              color: Theme.of(
+                context,
+              ).colorScheme.outline.withAlpha((0.5 * 255).round()),
+            ),
           ),
           minY: 0,
           maxY: totalMaxY > 0 ? totalMaxY * 1.1 : 100,
@@ -1230,13 +1617,18 @@ class ChartScreen extends StatelessWidget {
                 getTitlesWidget: (value, meta) => SideTitleWidget(
                   meta: meta,
                   child: Text(
-                      '${value.toStringAsFixed(0)}',
-                      style: const TextStyle(fontSize: 10)),
+                    value.toStringAsFixed(0),
+                    style: const TextStyle(fontSize: 10),
+                  ),
                 ),
               ),
             ),
-            topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-            rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles:false)),
+            topTitles: const AxisTitles(
+              sideTitles: SideTitles(showTitles: false),
+            ),
+            rightTitles: const AxisTitles(
+              sideTitles: SideTitles(showTitles: false),
+            ),
             bottomTitles: AxisTitles(
               sideTitles: SideTitles(
                 showTitles: true,
@@ -1285,7 +1677,8 @@ class SettingsSheet extends StatelessWidget {
   final String currencySymbol;
   final List<String> expenseCategories;
   final List<String> incomeCategories;
-  final List<Transaction> allTransactions; // NEW: Pass transactions for checking
+  final List<Transaction>
+  allTransactions; // NEW: Pass transactions for checking
   final Function(ThemeMode) onUpdateTheme;
   final Function(String) onUpdateCurrency;
   final Function(String, List<String>) onUpdateCategories;
@@ -1319,14 +1712,18 @@ class SettingsSheet extends StatelessWidget {
         children: [
           Text(
             'App Settings',
-            style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+            style: Theme.of(
+              context,
+            ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
           const Divider(height: 30),
 
           // --- Visual Group ---
           Text(
             'Visual',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Theme.of(context).colorScheme.primary),
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+            ),
           ),
           ListTile(
             title: const Text('Dark Mode'),
@@ -1342,7 +1739,9 @@ class SettingsSheet extends StatelessWidget {
           // --- Finance Group ---
           Text(
             'Finance',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Theme.of(context).colorScheme.primary),
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+            ),
           ),
           ListTile(
             title: const Text('Currency Symbol'),
@@ -1355,14 +1754,15 @@ class SettingsSheet extends StatelessWidget {
               },
               items: <String>['\$', '€', '£', '¥']
                   .map<DropdownMenuItem<String>>((String value) {
-                return DropdownMenuItem<String>(
-                  value: value,
-                  child: Text(value, style: const TextStyle(fontSize: 20)),
-                );
-              }).toList(),
+                    return DropdownMenuItem<String>(
+                      value: value,
+                      child: Text(value, style: const TextStyle(fontSize: 20)),
+                    );
+                  })
+                  .toList(),
             ),
           ),
-          
+
           // --- Category Editors ---
           const SizedBox(height: 20),
           CategoryEditor(
@@ -1386,7 +1786,8 @@ class SettingsSheet extends StatelessWidget {
             title: const Text('Import Transactions'),
             subtitle: const Text('Paste a JSON array or provide a file path'),
             onTap: () {
-              final TextEditingController pathController = TextEditingController();
+              final TextEditingController pathController =
+                  TextEditingController();
               showDialog<void>(
                 context: context,
                 builder: (dctx) {
@@ -1412,11 +1813,13 @@ class SettingsSheet extends StatelessWidget {
                                 label: const Text('Pick'),
                                 onPressed: () async {
                                   try {
-                                    final result = await FilePicker.platform.pickFiles(
-                                      type: FileType.custom,
-                                      allowedExtensions: ['json'],
-                                    );
-                                    if (result != null && result.files.isNotEmpty) {
+                                    final result = await FilePicker.platform
+                                        .pickFiles(
+                                          type: FileType.custom,
+                                          allowedExtensions: ['json'],
+                                        );
+                                    if (result != null &&
+                                        result.files.isNotEmpty) {
                                       final fp = result.files.first;
                                       final path = fp.path;
                                       if (path != null) {
@@ -1424,7 +1827,11 @@ class SettingsSheet extends StatelessWidget {
                                       }
                                     }
                                   } catch (e) {
-                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('File picker failed: $e')));
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('File picker failed: $e'),
+                                      ),
+                                    );
                                   }
                                 },
                               ),
@@ -1432,30 +1839,43 @@ class SettingsSheet extends StatelessWidget {
                           ),
                           const SizedBox(height: 12),
                           const SizedBox(height: 8),
-                          const Text('Select a JSON file to import. The existing transactions will be replaced.'),
+                          const Text(
+                            'Select a JSON file to import. The existing transactions will be replaced.',
+                          ),
                         ],
                       ),
                     ),
                     actions: [
-                      TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('Cancel')),
+                      TextButton(
+                        onPressed: () => Navigator.of(dctx).pop(),
+                        child: const Text('Cancel'),
+                      ),
                       TextButton(
                         key: const Key('importDialogImportButton'),
                         onPressed: () async {
                           final path = pathController.text.trim();
                           if (path.isEmpty) {
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No file selected')));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('No file selected')),
+                            );
                             return;
                           }
                           String content;
                           try {
                             final file = File(path);
                             if (!await file.exists()) {
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('File not found')),
+                              );
                               return;
                             }
                             content = await file.readAsString();
                           } catch (e) {
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to read file: $e')));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Failed to read file: $e'),
+                              ),
+                            );
                             return;
                           }
 
@@ -1507,7 +1927,7 @@ class _CategoryEditorState extends State<CategoryEditor> {
     super.initState();
     _localCategories = List.from(widget.categories);
   }
-  
+
   @override
   void didUpdateWidget(covariant CategoryEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -1522,14 +1942,14 @@ class _CategoryEditorState extends State<CategoryEditor> {
       _localCategories.add(newCategory);
       _controller.clear();
       // No setState() needed, parent update will rebuild
-      widget.onUpdate(widget.type, _localCategories); 
+      widget.onUpdate(widget.type, _localCategories);
     }
   }
 
   void _removeCategory(String category) {
     // --- FIX for Problem 3: Check if category is in use ---
     final isCategoryInUse = widget.allTransactions.any(
-      (txn) => txn.category == category && txn.type == widget.type
+      (txn) => txn.category == category && txn.type == widget.type,
     );
 
     if (isCategoryInUse) {
@@ -1539,7 +1959,8 @@ class _CategoryEditorState extends State<CategoryEditor> {
         builder: (ctx) => AlertDialog(
           title: const Text('Category in Use'),
           content: Text(
-              'The category "$category" cannot be deleted because it is used by existing transactions.'),
+            'The category "$category" cannot be deleted because it is used by existing transactions.',
+          ),
           actions: [
             TextButton(
               child: const Text('OK'),
@@ -1564,7 +1985,9 @@ class _CategoryEditorState extends State<CategoryEditor> {
       children: [
         Text(
           widget.title,
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 10),
         // Add new category
@@ -1606,7 +2029,9 @@ class _CategoryEditorState extends State<CategoryEditor> {
                 decoration: BoxDecoration(
                   border: Border(
                     bottom: BorderSide(
-                      color: Theme.of(context).colorScheme.outline.withOpacity(0.5),
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.outline.withAlpha((0.5 * 255).round()),
                     ),
                   ),
                 ),
@@ -1623,7 +2048,10 @@ class _CategoryEditorState extends State<CategoryEditor> {
                       ),
                       // Remove button
                       IconButton(
-                        icon: const Icon(Icons.delete_outline, color: Colors.red),
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          color: Colors.red,
+                        ),
                         onPressed: () => _removeCategory(category),
                       ),
                     ],
@@ -1661,7 +2089,8 @@ class TransactionEditorScreen extends StatefulWidget {
   });
 
   @override
-  State<TransactionEditorScreen> createState() => _TransactionEditorScreenState();
+  State<TransactionEditorScreen> createState() =>
+      _TransactionEditorScreenState();
 }
 
 class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
@@ -1672,11 +2101,15 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
   @override
   void initState() {
     super.initState();
-    _amountController = TextEditingController(text: widget.initial.amount.toStringAsFixed(2));
+    _amountController = TextEditingController(
+      text: widget.initial.amount.toStringAsFixed(2),
+    );
     _type = widget.initial.type;
     // Initialize category to the initial transaction's category if present,
     // otherwise fall back to the first available category or empty string.
-    final initialList = _type == 'expense' ? widget.expenseCategories : widget.incomeCategories;
+    final initialList = _type == 'expense'
+        ? widget.expenseCategories
+        : widget.incomeCategories;
     if (initialList.contains(widget.initial.category)) {
       _category = widget.initial.category;
     } else if (initialList.isNotEmpty) {
@@ -1694,14 +2127,19 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final categories = _type == 'expense' ? widget.expenseCategories : widget.incomeCategories;
+    final categories = _type == 'expense'
+        ? widget.expenseCategories
+        : widget.incomeCategories;
 
     bool hasCategories = categories.isNotEmpty;
 
     bool canSave() {
       final text = _amountController.text.trim();
       final value = double.tryParse(text);
-      return hasCategories && value != null && value > 0 && _category.isNotEmpty;
+      return hasCategories &&
+          value != null &&
+          value > 0 &&
+          _category.isNotEmpty;
     }
 
     return Scaffold(
@@ -1717,7 +2155,10 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
             const SizedBox(height: 8),
             TextField(
               controller: _amountController,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: false),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+                signed: false,
+              ),
               decoration: const InputDecoration(
                 labelText: 'Amount',
                 border: OutlineInputBorder(),
@@ -1726,8 +2167,11 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
             ),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: _type,
-              decoration: const InputDecoration(labelText: 'Type', border: OutlineInputBorder()),
+              initialValue: _type,
+              decoration: const InputDecoration(
+                labelText: 'Type',
+                border: OutlineInputBorder(),
+              ),
               items: const [
                 DropdownMenuItem(value: 'income', child: Text('Income')),
                 DropdownMenuItem(value: 'expense', child: Text('Expense')),
@@ -1737,7 +2181,9 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
                 setState(() {
                   _type = v;
                   // If the current category isn't in the new list, pick the first available
-                  final list = _type == 'expense' ? widget.expenseCategories : widget.incomeCategories;
+                  final list = _type == 'expense'
+                      ? widget.expenseCategories
+                      : widget.incomeCategories;
                   if (!list.contains(_category) && list.isNotEmpty) {
                     _category = list.first;
                   } else if (list.isEmpty) {
@@ -1749,7 +2195,10 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
             const SizedBox(height: 16),
             // Category selector: show ChoiceChips so the selected category is visually highlighted.
             if (hasCategories) ...[
-              const Text('Category', style: TextStyle(fontWeight: FontWeight.w600)),
+              const Text(
+                'Category',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -1762,9 +2211,18 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
                     onSelected: (sel) {
                       if (sel) setState(() => _category = c);
                     },
-                    selectedColor: Theme.of(context).colorScheme.primary.withOpacity(0.2),
-                    backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
-                    side: selected ? BorderSide(color: Theme.of(context).colorScheme.primary, width: 1.5) : null,
+                    selectedColor: Theme.of(
+                      context,
+                    ).colorScheme.primary.withAlpha((0.2 * 255).round()),
+                    backgroundColor: Theme.of(
+                      context,
+                    ).colorScheme.surfaceContainerHighest,
+                    side: selected
+                        ? BorderSide(
+                            color: Theme.of(context).colorScheme.primary,
+                            width: 1.5,
+                          )
+                        : null,
                   );
                 }).toList(),
               ),
@@ -1774,10 +2232,12 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
-                  color: Theme.of(context).colorScheme.error.withOpacity(0.08),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.error.withAlpha((0.08 * 255).round()),
                 ),
                 child: Text(
-                  'No categories available for "${_type}". Add categories in Settings before saving.',
+                  'No categories available for "$_type". Add categories in Settings before saving.',
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
@@ -1790,28 +2250,39 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
                     onPressed: () {
                       Navigator.of(context).pop<Transaction?>(null);
                     },
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey.shade300,
+                      foregroundColor: Colors.black,
+                    ),
                     child: const Text('Cancel'),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: canSave() ? () {
-                      final text = _amountController.text.trim();
-                      final value = double.tryParse(text);
-                      if (value == null || value <= 0) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a valid amount greater than 0')));
-                        return;
-                      }
-                      final updated = Transaction(
-                        amount: value,
-                        type: _type,
-                        category: _category,
-                        date: widget.initial.date,
-                      );
-                      Navigator.of(context).pop<Transaction>(updated);
-                    } : null,
+                    onPressed: canSave()
+                        ? () {
+                            final text = _amountController.text.trim();
+                            final value = double.tryParse(text);
+                            if (value == null || value <= 0) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Enter a valid amount greater than 0',
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+                            final updated = Transaction(
+                              amount: value,
+                              type: _type,
+                              category: _category,
+                              date: widget.initial.date,
+                            );
+                            Navigator.of(context).pop<Transaction>(updated);
+                          }
+                        : null,
                     child: const Text('Save'),
                   ),
                 ),
@@ -1823,10 +2294,12 @@ class _TransactionEditorScreenState extends State<TransactionEditorScreen> {
     );
   }
 }
+
 class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   int _currentDigit = 0;
-  List<int> _inputDigits = [0, 0, 0]; // start from 100s digit by default
-  int _currentIndex = 0; // 0 => 100s, 1 => 10s, 2 => 1s, then additional lower digits if appended
+  final List<int> _inputDigits = [0, 0, 0]; // start from 100s digit by default
+  int _currentIndex =
+      0; // 0 => 100s, 1 => 10s, 2 => 1s, then additional lower digits if appended
   Timer? _digitConfirmationTimer;
   double _currentValue = 0.0;
   // Flash flags for a subtle animation when a digit changes
@@ -1835,7 +2308,8 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   @override
   void initState() {
     super.initState();
-    if (_currentIndex < _inputDigits.length) _currentDigit = _inputDigits[_currentIndex];
+    if (_currentIndex < _inputDigits.length)
+      _currentDigit = _inputDigits[_currentIndex];
     _startDigitConfirmationTimer();
   }
 
@@ -1895,7 +2369,8 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       if (_inputDigits.isNotEmpty) {
         if (_inputDigits.length > 3) {
           _inputDigits.removeLast();
-          if (_currentIndex >= _inputDigits.length) _currentIndex = _inputDigits.length - 1;
+          if (_currentIndex >= _inputDigits.length)
+            _currentIndex = _inputDigits.length - 1;
           _currentDigit = _inputDigits[_currentIndex];
           _ensureFlashFlagsLength();
           _triggerFlash(_currentIndex);
@@ -1915,7 +2390,9 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   }
 
   void _ensureFlashFlagsLength() {
-    while (_flashFlags.length < _inputDigits.length) _flashFlags.add(false);
+    while (_flashFlags.length < _inputDigits.length) {
+      _flashFlags.add(false);
+    }
     if (_flashFlags.length > _inputDigits.length) {
       _flashFlags = _flashFlags.sublist(0, _inputDigits.length);
     }
@@ -1960,17 +2437,32 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text('Input Amount:', style: Theme.of(context).textTheme.headlineSmall),
+            Text(
+              'Input Amount:',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
             const SizedBox(height: 10),
-            Text('${_currentValue.toStringAsFixed(2)}', style: Theme.of(context).textTheme.displaySmall?.copyWith(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
+            Text(
+              _currentValue.toStringAsFixed(2),
+              style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
             const SizedBox(height: 40),
             Container(
               width: 200,
               height: 200,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Theme.of(context).colorScheme.surfaceVariant,
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 10, offset: const Offset(0, 5))],
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withAlpha((0.2 * 255).round()),
+                    blurRadius: 10,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
               ),
               child: GestureDetector(
                 onHorizontalDragEnd: (details) {
@@ -1978,7 +2470,8 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                   setState(() {
                     if (vx > 100) {
                       _currentIndex = _currentIndex + 1;
-                      if (_currentIndex >= _inputDigits.length) _inputDigits.add(0);
+                      if (_currentIndex >= _inputDigits.length)
+                        _inputDigits.add(0);
                       _currentDigit = _inputDigits[_currentIndex];
                     } else if (vx < -100) {
                       if (_currentIndex > 0) _currentIndex = _currentIndex - 1;
@@ -1992,7 +2485,11 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                   children: [
                     Positioned(
                       top: 10,
-                      child: IconButton(icon: const Icon(Icons.keyboard_arrow_up, size: 50), onPressed: _incrementDigit, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      child: IconButton(
+                        icon: const Icon(Icons.keyboard_arrow_up, size: 50),
+                        onPressed: _incrementDigit,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
                     ),
                     Column(
                       mainAxisSize: MainAxisSize.min,
@@ -2004,7 +2501,8 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                             final val = entry.value;
                             final selected = idx == _currentIndex;
                             // Animate digit changes with a subtle scale+opacity flash.
-                            final isFlashing = idx < _flashFlags.length && _flashFlags[idx];
+                            final isFlashing =
+                                idx < _flashFlags.length && _flashFlags[idx];
                             final baseScale = selected ? 1.05 : 1.0;
                             final flashScale = isFlashing ? 1.18 : baseScale;
                             return AnimatedScale(
@@ -2013,16 +2511,31 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                               scale: flashScale,
                               child: AnimatedOpacity(
                                 duration: const Duration(milliseconds: 220),
-                                opacity: isFlashing ? 1.0 : (selected ? 1.0 : 0.88),
+                                opacity: isFlashing
+                                    ? 1.0
+                                    : (selected ? 1.0 : 0.88),
                                 child: Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6.0),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6.0,
+                                  ),
                                   child: Text(
                                     val.toString(),
-                                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                                      fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-                                      color: selected ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.onSurfaceVariant,
-                                      fontSize: selected ? 42 : 24,
-                                    ),
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .displaySmall
+                                        ?.copyWith(
+                                          fontWeight: selected
+                                              ? FontWeight.bold
+                                              : FontWeight.normal,
+                                          color: selected
+                                              ? Theme.of(
+                                                  context,
+                                                ).colorScheme.primary
+                                              : Theme.of(
+                                                  context,
+                                                ).colorScheme.onSurfaceVariant,
+                                          fontSize: selected ? 42 : 24,
+                                        ),
                                   ),
                                 ),
                               ),
@@ -2030,28 +2543,62 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                           }).toList(),
                         ),
                         const SizedBox(height: 6),
-                        Text(_currentIndex == 0 ? '100s' : (_currentIndex == 1 ? '10s' : (_currentIndex == 2 ? '1s' : 'lower')), style: Theme.of(context).textTheme.bodySmall),
+                        Text(
+                          _currentIndex == 0
+                              ? '100s'
+                              : (_currentIndex == 1
+                                    ? '10s'
+                                    : (_currentIndex == 2 ? '1s' : 'lower')),
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
                       ],
                     ),
                     Positioned(
                       bottom: 10,
-                      child: IconButton(icon: const Icon(Icons.keyboard_arrow_down, size: 50), onPressed: _decrementDigit, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      child: IconButton(
+                        icon: const Icon(Icons.keyboard_arrow_down, size: 50),
+                        onPressed: _decrementDigit,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 40),
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              ElevatedButton.icon(onPressed: _inputDigits.isNotEmpty ? _removeLastDigit : null, icon: const Icon(Icons.backspace), label: const Text('Back'), style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15))),
-              const SizedBox(width: 20),
-              ElevatedButton.icon(onPressed: () => Navigator.of(context).pop(_currentValue), icon: const Icon(Icons.done), label: const Text('Done'), style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15), backgroundColor: Theme.of(context).colorScheme.primary, foregroundColor: Theme.of(context).colorScheme.onPrimary)),
-            ]),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: _inputDigits.isNotEmpty ? _removeLastDigit : null,
+                  icon: const Icon(Icons.backspace),
+                  label: const Text('Back'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 15,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 20),
+                ElevatedButton.icon(
+                  onPressed: () => Navigator.of(context).pop(_currentValue),
+                  icon: const Icon(Icons.done),
+                  label: const Text('Done'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 15,
+                    ),
+                    backgroundColor: Theme.of(context).colorScheme.primary,
+                    foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 }
-
-
