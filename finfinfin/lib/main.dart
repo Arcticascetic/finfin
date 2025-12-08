@@ -9,10 +9,15 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flex_color_scheme/flex_color_scheme.dart';
-import 'package:google_fonts/google_fonts.dart';
+// ----------------------------------------------------------------------
+// Main Entry Point & App Shell
+// ----------------------------------------------------------------------
+
 import 'models/transaction.dart';
 import 'models/transactions_notifier.dart';
 
+/// The entry point for the application.
+/// Initializes bindings, Hive, and runs the root [BudgetApp].
 void main() async {
   // Ensure the app starts with necessary bindings for date formatting
   Intl.defaultLocale = 'en_US';
@@ -90,6 +95,8 @@ class _BudgetAppState extends State<BudgetApp> {
   late TransactionsNotifier _transactionsNotifier;
   List<Transaction> get _transactions => _transactionsNotifier.transactions;
   bool _isLoading = true;
+  bool _hasError = false;
+  String _errorMessage = '';
 
   @override
   void initState() {
@@ -116,6 +123,13 @@ class _BudgetAppState extends State<BudgetApp> {
 
   // --- Persistence & Initialization ---
 
+  /// Loads settings (theme, currency) and data (categories, transactions).
+  ///
+  /// This method handles:
+  /// 1. SharedPreferences loading for simple settings.
+  /// 2. Hive initialization with a timeout to prevent freezes.
+  /// 3. Migration from legacy SharedPreferences transaction storage if found.
+  /// 4. Initial "Lazy Load" of transactions via [TransactionsNotifier].
   Future<void> _loadSettingsAndData() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -129,32 +143,70 @@ class _BudgetAppState extends State<BudgetApp> {
 
     // 3. Load Transactions
     // 3. Init Hive and Transactions
-    final box = await Hive.openBox('transactions_box');
-    _transactionsNotifier = TransactionsNotifier(box);
-    _transactionsNotifier.addListener(() {
-      setState(() {});
-    });
+    // 3. Init Hive and Transactions with Timeout Protection
+    try {
+      await Future(() async {
+        final box = await Hive.openBox('transactions_box');
+        // Create Notifier
+        // --- RESET ON STARTUP (Requested) ---
+        await box.clear();
 
-    // Check for SharedPreferences migration
-    final transactionStrings = prefs.getStringList('transactions');
-    if (transactionStrings != null) {
-      // Migrate to Hive
-      final List<Transaction> migrated = [];
-      for (var s in transactionStrings) {
-        try {
-          final map = json.decode(s) as Map<String, dynamic>;
-          migrated.add(Transaction.fromJson(map));
-        } catch (_) {}
+        _transactionsNotifier = TransactionsNotifier(box);
+        _transactionsNotifier.addListener(() {
+          setState(() {});
+        });
+
+        // Check for SharedPreferences migration
+        final transactionStrings = prefs.getStringList('transactions');
+        if (transactionStrings != null) {
+          // Migrate to Hive
+          final List<Transaction> migrated = [];
+          for (var s in transactionStrings) {
+            try {
+              final map = json.decode(s) as Map<String, dynamic>;
+              migrated.add(Transaction.fromJson(map));
+            } catch (_) {}
+          }
+          // Add to notifier (bulk)
+          if (migrated.isNotEmpty) {
+            await _transactionsNotifier.addTransactions(migrated);
+          }
+          // Clear prefs
+          await prefs.remove('transactions');
+        }
+
+        await _transactionsNotifier.loadFromHive();
+      }).timeout(const Duration(seconds: 60));
+    } on TimeoutException {
+      // Emergency Reset: Delete box and retry
+      await Hive.deleteBoxFromDisk('transactions_box');
+      final box = await Hive.openBox('transactions_box');
+      _transactionsNotifier = TransactionsNotifier(box);
+      _transactionsNotifier.addListener(() {
+        setState(() {});
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Startup freeze detected. Database has been reset to recover.',
+            ),
+            backgroundColor: Theme.of(context).colorScheme.error,
+            duration: const Duration(seconds: 10),
+          ),
+        );
       }
-      // Add to notifier (bulk)
-      if (migrated.isNotEmpty) {
-        await _transactionsNotifier.addTransactions(migrated);
+    } catch (e) {
+      debugPrint('Initialization Error: $e');
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _errorMessage = e.toString();
+          _isLoading = false;
+        });
       }
-      // Clear prefs
-      await prefs.remove('transactions');
+      return; // Stop execution here
     }
-
-    await _transactionsNotifier.loadFromHive();
 
     setState(() {
       _currencySymbol = savedCurrency ?? '\$';
@@ -209,13 +261,8 @@ class _BudgetAppState extends State<BudgetApp> {
     Transaction oldTransaction,
     Transaction newTransaction,
   ) {
-    final idx = _transactions.indexWhere(
-      (t) =>
-          t.date == oldTransaction.date &&
-          t.type == oldTransaction.type &&
-          t.category == oldTransaction.category &&
-          t.amount == oldTransaction.amount,
-    );
+    // Use ID matching for robust lookup
+    final idx = _transactions.indexWhere((t) => t.id == oldTransaction.id);
     if (idx != -1) {
       _transactionsNotifier.updateTransaction(oldTransaction, newTransaction);
     }
@@ -302,7 +349,7 @@ class _BudgetAppState extends State<BudgetApp> {
         visualDensity: FlexColorScheme.comfortablePlatformDensity,
         useMaterial3: true,
         swapLegacyOnMaterial3: true,
-        fontFamily: GoogleFonts.outfit().fontFamily,
+        fontFamily: 'Outfit', // Uses local asset
       ),
       darkTheme: FlexThemeData.dark(
         scheme: usedScheme,
@@ -321,7 +368,7 @@ class _BudgetAppState extends State<BudgetApp> {
         visualDensity: FlexColorScheme.comfortablePlatformDensity,
         useMaterial3: true,
         swapLegacyOnMaterial3: true,
-        fontFamily: GoogleFonts.outfit().fontFamily,
+        fontFamily: 'Outfit',
       ),
       themeMode: _themeMode,
       home: DefaultTabController(
@@ -345,6 +392,39 @@ class _BudgetAppState extends State<BudgetApp> {
           ),
           body: _isLoading
               ? const Center(child: CircularProgressIndicator())
+              : _hasError
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.error_outline,
+                          size: 48,
+                          color: Colors.red,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Failed to load application data.\n\n$_errorMessage',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              _isLoading = true;
+                              _hasError = false;
+                            });
+                            _loadSettingsAndData();
+                          },
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
               : TabBarView(
                   children: [
                     // --- Tab 1: Home Screen ---
@@ -355,10 +435,15 @@ class _BudgetAppState extends State<BudgetApp> {
                       filterRange: _filterRange,
                       expenseCategories: _expenseCategories,
                       incomeCategories: _incomeCategories,
+                      availableMonths: _transactionsNotifier.availableMonths,
+                      loadedMonths: _transactionsNotifier.loadedMonths,
+                      totalBalance: _transactionsNotifier.totalBalance,
                       onAddTransaction: _addTransaction,
                       onRemoveTransaction: _removeTransaction,
                       onEditTransaction: _updateTransaction,
                       onUpdateFilter: _updateFilterRange,
+                      onLoadMonth: (month) =>
+                          _transactionsNotifier.loadMonth(month),
                     ),
                     // --- Tab 2: Chart Screen ---
                     ChartScreen(
@@ -390,9 +475,47 @@ class _BudgetAppState extends State<BudgetApp> {
           onUpdateCategories: _updateCategories,
           onImportTransactions: (jsonString) =>
               _importTransactionsFromJsonString(ctx, jsonString),
+          onResetData: () async {
+            Navigator.pop(ctx); // Close settings first
+            _confirmAndResetData();
+          },
         );
       },
     );
+  }
+
+  Future<void> _confirmAndResetData() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset All Data?'),
+        content: const Text(
+          'This will permanently delete ALL transactions. This action cannot be undone.\n\nCategories and settings will be preserved.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Reset', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await _transactionsNotifier.clearAllTransactions();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('All transactions have been erased.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   /// Import transactions from a JSON string. Accepts either:
@@ -650,6 +773,13 @@ class CategorySelectionScreen extends StatelessWidget {
 }
 
 // --- HomeScreen with Year/Month grouping (collapsible mother transactions) ---
+/// The main screen displaying the list of transactions.
+///
+/// It supports:
+/// - Filtering by date range.
+/// - Grouping transactions by Year and Month.
+/// - Lazy loading of monthly data (via expanding month tiles).
+/// - Deleting and editing transactions.
 class HomeScreen extends StatefulWidget {
   final List<Transaction> transactions;
   final List<Transaction> allTransactions;
@@ -657,11 +787,18 @@ class HomeScreen extends StatefulWidget {
   final DateTimeRange? filterRange;
   final List<String> expenseCategories;
   final List<String> incomeCategories;
+
+  // Callbacks
   final Function(double, String, String) onAddTransaction;
   final Function(Transaction) onRemoveTransaction;
-  // onEditTransaction: (oldTransaction, newTransaction)
   final Function(Transaction, Transaction) onEditTransaction;
   final Function(DateTimeRange?) onUpdateFilter;
+
+  // Lazy Loading Params
+  final Set<String> availableMonths;
+  final Set<String> loadedMonths;
+  final double totalBalance;
+  final Function(String) onLoadMonth;
 
   const HomeScreen({
     super.key,
@@ -675,6 +812,10 @@ class HomeScreen extends StatefulWidget {
     required this.onRemoveTransaction,
     required this.onEditTransaction,
     required this.onUpdateFilter,
+    required this.availableMonths,
+    required this.loadedMonths,
+    required this.totalBalance,
+    required this.onLoadMonth,
   });
 
   @override
@@ -686,8 +827,6 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<int> _expandedYears = {};
   final Set<String> _expandedMonths = {}; // key: "{year}-{month}"
   // Caching to avoid recomputing grouping on every build for large datasets.
-  String? _cachedTxKey;
-  Map<int, Map<int, List<Transaction>>>? _cachedGrouped;
 
   @override
   void initState() {
@@ -699,41 +838,33 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void didUpdateWidget(covariant HomeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // If transactions reference changed or content changed, update cache and expand latest.
-    final newKey = _computeTxKey(widget.transactions);
-    if (newKey != _cachedTxKey) {
-      setState(() {
-        _updateCacheAndEnsureLatestExpanded();
-      });
+    // If the list of transactions changes (e.g. lazy load finished, or new item added),
+    // we re-evaluate if we need to auto-expand the latest month.
+    if (widget.transactions.isNotEmpty &&
+        widget.transactions != oldWidget.transactions) {
+      _updateCacheAndEnsureLatestExpanded();
     }
   }
 
-  String _computeTxKey(List<Transaction> txns) {
-    // Simple checksum: length + concatenation of timestamp and amount for each txn.
-    // This is intentionally simple and fast; it should change when transactions change.
-    final sb = StringBuffer();
-    sb.write(txns.length);
-    for (var t in txns) {
-      sb.write(
-        '|${t.date.millisecondsSinceEpoch}:${t.amount}:${t.type}:${t.category}',
-      );
-    }
-    return sb.toString();
-  }
+  // _computeTxKey removed
 
   void _updateCacheAndEnsureLatestExpanded() {
-    _cachedTxKey = _computeTxKey(widget.transactions);
-    _cachedGrouped = _groupByYearMonth(widget.transactions);
+    // _cachedTxKey = _computeTxKey(widget.transactions);
+    // _cachedGrouped = _groupByYearMonth(widget.transactions); // Removed
     if (widget.transactions.isNotEmpty) {
       // Find the latest transaction and expand its year/month so latest transactions remain visible.
-      Transaction latest = widget.transactions.first;
-      for (var t in widget.transactions) {
-        if (t.date.isAfter(latest.date)) latest = t;
+      Transaction? latest;
+      if (widget.transactions.isNotEmpty) latest = widget.transactions.first;
+
+      if (latest != null) {
+        for (var t in widget.transactions) {
+          if (t.date.isAfter(latest!.date)) latest = t;
+        }
+        final ly = latest!.date.year;
+        final lm = latest.date.month;
+        _expandedYears.add(ly);
+        _expandedMonths.add('$ly-$lm');
       }
-      final ly = latest.date.year;
-      final lm = latest.date.month;
-      _expandedYears.add(ly);
-      _expandedMonths.add('$ly-$lm');
     }
   }
 
@@ -754,27 +885,6 @@ class _HomeScreenState extends State<HomeScreen> {
       initialDateRange: widget.filterRange,
     );
     widget.onUpdateFilter(newRange);
-  }
-
-  // Group transactions into a map: year -> month -> list
-  Map<int, Map<int, List<Transaction>>> _groupByYearMonth(
-    List<Transaction> txns,
-  ) {
-    final Map<int, Map<int, List<Transaction>>> result = {};
-    for (var t in txns) {
-      final y = t.date.year;
-      final m = t.date.month;
-      result.putIfAbsent(y, () => {});
-      result[y]!.putIfAbsent(m, () => []);
-      result[y]![m]!.add(t);
-    }
-    // Sort each month list by date ascending
-    for (var y in result.keys) {
-      for (var m in result[y]!.keys) {
-        result[y]![m]!.sort((a, b) => a.date.compareTo(b.date));
-      }
-    }
-    return result;
   }
 
   // Show the same transaction menu used before; extracted to instance method so it has access to widget callbacks.
@@ -876,18 +986,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   @override
+  @override
   Widget build(BuildContext context) {
-    final transactions = widget.transactions;
+    // 1. Use the pre-calculated total balance from the widget
+    double totalBalance = widget.totalBalance;
 
-    double totalBalance = transactions.fold(0.0, (sum, item) {
-      if (item.type == 'income') return sum + item.amount;
-      return sum - item.amount;
-    });
+    // 2. Build structure from AVAILABLE months (not just loaded ones)
+    final available = widget.availableMonths;
+    final Map<int, Set<int>> yearStructure = {};
+    for (var ym in available) {
+      if (ym.length != 6) continue;
+      final y = int.parse(ym.substring(0, 4));
+      final m = int.parse(ym.substring(4, 6));
+      yearStructure.putIfAbsent(y, () => {}).add(m);
+    }
 
-    // Use cached grouping when available to improve performance on large lists.
-    final grouped = _cachedGrouped ?? _groupByYearMonth(transactions);
     // Sort years descending
-    final years = grouped.keys.toList()..sort((a, b) => b.compareTo(a));
+    final years = yearStructure.keys.toList()..sort((a, b) => b.compareTo(a));
 
     return Column(
       children: [
@@ -961,7 +1076,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
         // --- Grouped Transaction List (Years -> Months -> Transactions) ---
         Expanded(
-          child: transactions.isEmpty
+          child: years.isEmpty
               ? const Center(
                   child: Text(
                     'No transactions in this period.\nAdd some or change the filter.',
@@ -973,19 +1088,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   itemCount: years.length,
                   itemBuilder: (context, yi) {
                     final year = years[yi];
-                    final monthsMap = grouped[year]!;
-                    final months = monthsMap.keys.toList()
+                    final monthsSet = yearStructure[year]!;
+                    final months = monthsSet.toList()
                       ..sort((a, b) => b.compareTo(a));
 
-                    // Year total
-                    double yearTotal = 0;
-                    for (var m in months) {
-                      for (var t in monthsMap[m]!) {
-                        yearTotal += t.type == 'income' ? t.amount : -t.amount;
-                      }
-                    }
-
                     final yearExpanded = _expandedYears.contains(year);
+
+                    // We can't easily calculate year total without loading all months.
+                    // UI decision: Show nothing or "..." if not fully loaded.
+                    // For simplicity, we just show "History" or similar if needed,
+                    // but here we leave subtitle blank or partial.
 
                     return Card(
                       margin: const EdgeInsets.symmetric(
@@ -1002,10 +1114,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             fontSize: 18,
                           ),
                         ),
-                        trailing: Text(
-                          '${widget.currencySymbol}${yearTotal.toStringAsFixed(2)}',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
+                        // Removed Year Total since it's lazy loaded
                         onExpansionChanged: (open) => setState(() {
                           if (open) {
                             _expandedYears.add(year);
@@ -1014,14 +1123,41 @@ class _HomeScreenState extends State<HomeScreen> {
                           }
                         }),
                         children: months.map((month) {
-                          final monthKey = '$year-$month';
-                          final txns = monthsMap[month]!;
+                          final monthKey =
+                              '$year-$month'; // e.g. 2023-5 (not padded)
+                          // Construct YYYYMM for internal usage
+                          final yyyyMM =
+                              '$year${month.toString().padLeft(2, '0')}';
+
+                          final isLoaded = widget.loadedMonths.contains(yyyyMM);
+
+                          // Get loaded transactions for this month ONLY if loaded
+                          final monthTxns = isLoaded
+                              ? widget.transactions
+                                    .where(
+                                      (t) =>
+                                          t.date.year == year &&
+                                          t.date.month == month,
+                                    )
+                                    .toList()
+                              : <Transaction>[];
+
+                          if (monthTxns.isNotEmpty) {
+                            monthTxns.sort(
+                              (a, b) => a.date.compareTo(b.date),
+                            ); // Ensure sorted
+                          }
+
                           // Month total
-                          double monthTotal = txns.fold(
-                            0.0,
-                            (s, t) =>
-                                s + (t.type == 'income' ? t.amount : -t.amount),
-                          );
+                          double monthTotal = 0;
+                          if (isLoaded) {
+                            monthTotal = monthTxns.fold(
+                              0.0,
+                              (s, t) =>
+                                  s +
+                                  (t.type == 'income' ? t.amount : -t.amount),
+                            );
+                          }
 
                           final monthExpanded = _expandedMonths.contains(
                             monthKey,
@@ -1046,104 +1182,153 @@ class _HomeScreenState extends State<HomeScreen> {
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
-                                  Text(
-                                    '${txns.length} items',
-                                    style: const TextStyle(color: Colors.grey),
-                                  ),
+                                  if (isLoaded)
+                                    Text(
+                                      '${monthTxns.length} items',
+                                      style: const TextStyle(
+                                        color: Colors.grey,
+                                      ),
+                                    ),
                                 ],
                               ),
-                              subtitle: Text(
-                                '${widget.currencySymbol}${monthTotal.toStringAsFixed(2)}',
-                              ),
+                              subtitle: isLoaded
+                                  ? Text(
+                                      '${widget.currencySymbol}${monthTotal.toStringAsFixed(2)}',
+                                    )
+                                  : const Text(
+                                      'Tap to load...',
+                                      style: TextStyle(
+                                        fontStyle: FontStyle.italic,
+                                        color: Colors.blue,
+                                      ),
+                                    ),
                               initiallyExpanded: monthExpanded,
-                              onExpansionChanged: (open) => setState(() {
-                                if (open) {
-                                  _expandedMonths.add(monthKey);
-                                } else {
-                                  _expandedMonths.remove(monthKey);
-                                }
-                              }),
-                              children: txns.reversed.map((transaction) {
-                                final sign = transaction.type == 'income'
-                                    ? '+'
-                                    : '-';
-                                final color = transaction.type == 'income'
-                                    ? Colors.green
-                                    : Colors.red;
+                              onExpansionChanged: (open) {
+                                setState(() {
+                                  if (open) {
+                                    _expandedMonths.add(monthKey);
+                                    if (!isLoaded) {
+                                      // Lazy Load
+                                      widget.onLoadMonth(yyyyMM);
+                                    }
+                                  } else {
+                                    _expandedMonths.remove(monthKey);
+                                  }
+                                });
+                              },
+                              children: isLoaded
+                                  ? monthTxns.reversed.map((transaction) {
+                                      final sign = transaction.type == 'income'
+                                          ? '+'
+                                          : '-';
+                                      final color = transaction.type == 'income'
+                                          ? Colors.green
+                                          : Colors.red;
 
-                                return Dismissible(
-                                  key: ValueKey(
-                                    transaction.date.toIso8601String() +
-                                        transaction.amount.toString(),
-                                  ),
-                                  direction: DismissDirection.horizontal,
-                                  background: Container(
-                                    color: Colors.redAccent,
-                                    alignment: Alignment.centerLeft,
-                                    padding: const EdgeInsets.only(left: 20),
-                                    child: const Icon(
-                                      Icons.delete,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  secondaryBackground: Container(
-                                    color: Colors.redAccent,
-                                    alignment: Alignment.centerRight,
-                                    padding: const EdgeInsets.only(right: 20),
-                                    child: const Icon(
-                                      Icons.delete,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  onDismissed: (_) =>
-                                      widget.onRemoveTransaction(transaction),
-                                  child: Card(
-                                    margin: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 6,
-                                    ),
-                                    child: GestureDetector(
-                                      onLongPressStart: (details) =>
-                                          _showTransactionMenu(
+                                      return Dismissible(
+                                        key: ValueKey(
+                                          transaction.date.toIso8601String() +
+                                              transaction.amount.toString(),
+                                        ),
+                                        direction: DismissDirection.horizontal,
+                                        background: Container(
+                                          color: Colors.redAccent,
+                                          alignment: Alignment.centerLeft,
+                                          padding: const EdgeInsets.only(
+                                            left: 20,
+                                          ),
+                                          child: const Icon(
+                                            Icons.delete,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                        secondaryBackground: Container(
+                                          color: Colors.redAccent,
+                                          alignment: Alignment.centerRight,
+                                          padding: const EdgeInsets.only(
+                                            right: 20,
+                                          ),
+                                          child: const Icon(
+                                            Icons.delete,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                        onDismissed: (_) => widget
+                                            .onRemoveTransaction(transaction),
+                                        child: Card(
+                                          elevation: 0,
+                                          color: Theme.of(
                                             context,
-                                            details.globalPosition,
-                                            transaction,
+                                          ).colorScheme.surfaceContainer,
+                                          margin: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                            vertical: 4,
                                           ),
-                                      onSecondaryTapDown: (details) =>
-                                          _showTransactionMenu(
-                                            context,
-                                            details.globalPosition,
-                                            transaction,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
                                           ),
-                                      child: ListTile(
-                                        leading: Icon(
-                                          transaction.type == 'income'
-                                              ? Icons.arrow_circle_up
-                                              : Icons.arrow_circle_down,
-                                          color: color,
-                                        ),
-                                        title: Text(
-                                          transaction.category,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
+                                          child: ListTile(
+                                            onLongPress: () =>
+                                                _showTransactionMenu(
+                                                  context,
+                                                  Offset.zero,
+                                                  transaction,
+                                                ),
+                                            leading: Container(
+                                              padding: const EdgeInsets.all(12),
+                                              decoration: BoxDecoration(
+                                                color: color.withOpacity(0.1),
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Icon(
+                                                transaction.type == 'income'
+                                                    ? Icons.arrow_downward
+                                                    : Icons.arrow_upward,
+                                                color: color,
+                                              ),
+                                            ),
+                                            title: Text(
+                                              transaction.category,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            subtitle: Text(
+                                              DateFormat(
+                                                'MMM d, y',
+                                              ).format(transaction.date),
+                                              style: TextStyle(
+                                                color: Theme.of(
+                                                  context,
+                                                ).colorScheme.onSurfaceVariant,
+                                              ),
+                                            ),
+                                            trailing: Text(
+                                              '$sign${widget.currencySymbol}${transaction.amount.toStringAsFixed(2)}',
+                                              style: TextStyle(
+                                                color: color,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 16,
+                                                fontFamily: 'Outfit',
+                                              ),
+                                            ),
                                           ),
                                         ),
-                                        subtitle: Text(
-                                          '${transaction.type == 'income' ? 'Income' : 'Expense'} - ${DateFormat('MMM d, hh:mm a').format(transaction.date)}',
-                                        ),
-                                        trailing: Text(
-                                          '$sign ${widget.currencySymbol}${transaction.amount.toStringAsFixed(2)}',
-                                          style: TextStyle(
-                                            color: color,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
+                                      );
+                                    }).toList()
+                                  : const [
+                                      Padding(
+                                        padding: EdgeInsets.all(16.0),
+                                        child: Center(
+                                          child: Text(
+                                            "Expand to load transactions",
                                           ),
                                         ),
                                       ),
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
+                                    ],
                             ),
                           );
                         }).toList(),
@@ -1213,6 +1398,13 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // --- ChartScreen with duration selector ---
+
+/// A screen that displays visual analytics of the transactions.
+///
+/// Features:
+/// - Pie chart for expense breakdown.
+/// - Line chart for balance history.
+/// - Duration selectors (Last 7 days, Last Month, Custom, etc).
 class ChartScreen extends StatefulWidget {
   final List<Transaction> transactions; // provided (may be filtered)
   final List<Transaction>?
@@ -1501,12 +1693,14 @@ class _ChartScreenState extends State<ChartScreen> {
           fontSize: 14,
           fontWeight: FontWeight.bold,
           color: Colors.white,
+          fontFamily: 'Outfit',
         ),
         badgeWidget: Text(
           data.key,
           style: TextStyle(
             fontWeight: FontWeight.bold,
             color: Theme.of(context).colorScheme.onSurface,
+            fontFamily: 'Outfit',
           ),
         ),
         badgePositionPercentageOffset: 1.05,
@@ -1562,7 +1756,11 @@ class _ChartScreenState extends State<ChartScreen> {
                   meta: meta,
                   child: Text(
                     '$currencySymbol${value.toStringAsFixed(0)}',
-                    style: const TextStyle(fontSize: 10),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                      fontFamily: 'Outfit',
+                    ),
                   ),
                 ),
               ),
@@ -1650,7 +1848,11 @@ class _ChartScreenState extends State<ChartScreen> {
                   meta: meta,
                   child: Text(
                     value.toStringAsFixed(0),
-                    style: const TextStyle(fontSize: 10),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                      fontFamily: 'Outfit',
+                    ),
                   ),
                 ),
               ),
@@ -1666,8 +1868,16 @@ class _ChartScreenState extends State<ChartScreen> {
                 showTitles: true,
                 reservedSize: 22,
                 getTitlesWidget: (value, meta) {
-                  if (value == 0) return const Text('Income');
-                  if (value == 1) return const Text('Expense');
+                  if (value == 0)
+                    return const Text(
+                      'Income',
+                      style: TextStyle(fontSize: 12, fontFamily: 'Outfit'),
+                    );
+                  if (value == 1)
+                    return const Text(
+                      'Expense',
+                      style: TextStyle(fontSize: 12, fontFamily: 'Outfit'),
+                    );
                   return const Text('');
                 },
               ),
@@ -1715,6 +1925,7 @@ class SettingsSheet extends StatelessWidget {
   final Function(String) onUpdateCurrency;
   final Function(String, List<String>) onUpdateCategories;
   final Function(String) onImportTransactions;
+  final VoidCallback onResetData;
 
   const SettingsSheet({
     super.key,
@@ -1727,6 +1938,7 @@ class SettingsSheet extends StatelessWidget {
     required this.onUpdateCurrency,
     required this.onUpdateCategories,
     required this.onImportTransactions,
+    required this.onResetData,
   });
 
   @override
@@ -1923,6 +2135,20 @@ class SettingsSheet extends StatelessWidget {
               );
             },
           ),
+          const SizedBox(height: 20),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.delete_forever, color: Colors.red),
+            title: const Text(
+              'Reset Data',
+              style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+            ),
+            subtitle: const Text(
+              'Erase all transactions. Categories and settings are kept.',
+            ),
+            onTap: onResetData,
+          ),
+          const SizedBox(height: 20),
         ],
       ),
     );

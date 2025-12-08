@@ -1,5 +1,9 @@
 import 'package:uuid/uuid.dart';
 
+/// Represents a single financial transaction (Income or Expense).
+///
+/// Each transaction is identified by a unique [id] (UUID).
+/// [date] is stored and used for generating Hive keys (YYYYMM-UUID).
 class Transaction {
   final String id;
   final double amount;
