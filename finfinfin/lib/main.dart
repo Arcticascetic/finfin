@@ -8,14 +8,16 @@ import 'dart:io' show Platform, File;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:flex_color_scheme/flex_color_scheme.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'models/transaction.dart';
 import 'models/transactions_notifier.dart';
 
 void main() async {
   // Ensure the app starts with necessary bindings for date formatting
   Intl.defaultLocale = 'en_US';
-  await Hive.initFlutter();
   WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
   // Wrap the app with a top-level MaterialApp to guarantee MaterialLocalizations
   // are available to any widget that may be built during initialization.
   runApp(
@@ -144,9 +146,9 @@ class _BudgetAppState extends State<BudgetApp> {
           migrated.add(Transaction.fromJson(map));
         } catch (_) {}
       }
-      // Add to notifier (which saves to Hive)
-      for (var t in migrated) {
-        await _transactionsNotifier.addTransaction(t);
+      // Add to notifier (bulk)
+      if (migrated.isNotEmpty) {
+        await _transactionsNotifier.addTransactions(migrated);
       }
       // Clear prefs
       await prefs.remove('transactions');
@@ -273,23 +275,53 @@ class _BudgetAppState extends State<BudgetApp> {
   // --- Build Method ---
   @override
   Widget build(BuildContext context) {
-    const Color primaryBlue = Color(0xFF00BCD4);
+    // Use a premium FlexScheme
+    const FlexScheme usedScheme = FlexScheme.bahamaBlue;
 
     return MaterialApp(
       title: 'Clickwheel Budget App',
-      theme: ThemeData.from(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: primaryBlue,
-          brightness: Brightness.light,
+      theme: FlexThemeData.light(
+        scheme: usedScheme,
+        surfaceMode: FlexSurfaceMode.levelSurfacesLowScaffold,
+        blendLevel: 7,
+        subThemesData: const FlexSubThemesData(
+          blendOnLevel: 10,
+          blendOnColors: false,
+          useTextTheme: true,
+          useM2StyleDividerInM3: true,
+          defaultRadius: 12.0,
+          elevatedButtonSchemeColor: SchemeColor.onPrimaryContainer,
+          elevatedButtonSecondarySchemeColor: SchemeColor.primaryContainer,
+          outlinedButtonOutlineSchemeColor: SchemeColor.primary,
+          toggleButtonsBorderSchemeColor: SchemeColor.primary,
+          inputDecoratorSchemeColor: SchemeColor.primary,
+          inputDecoratorIsFilled: false,
+          inputDecoratorRadius: 12.0,
+          inputDecoratorUnfocusedHasBorder: false,
         ),
+        visualDensity: FlexColorScheme.comfortablePlatformDensity,
         useMaterial3: true,
+        swapLegacyOnMaterial3: true,
+        fontFamily: GoogleFonts.outfit().fontFamily,
       ),
-      darkTheme: ThemeData.from(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: primaryBlue,
-          brightness: Brightness.dark,
-        ).copyWith(surface: const Color(0xFF102A43), primary: primaryBlue),
+      darkTheme: FlexThemeData.dark(
+        scheme: usedScheme,
+        surfaceMode: FlexSurfaceMode.levelSurfacesLowScaffold,
+        blendLevel: 13,
+        subThemesData: const FlexSubThemesData(
+          blendOnLevel: 20,
+          useTextTheme: true,
+          useM2StyleDividerInM3: true,
+          defaultRadius: 12.0,
+          inputDecoratorSchemeColor: SchemeColor.primary,
+          inputDecoratorIsFilled: false,
+          inputDecoratorRadius: 12.0,
+          inputDecoratorUnfocusedHasBorder: false,
+        ),
+        visualDensity: FlexColorScheme.comfortablePlatformDensity,
         useMaterial3: true,
+        swapLegacyOnMaterial3: true,
+        fontFamily: GoogleFonts.outfit().fontFamily,
       ),
       themeMode: _themeMode,
       home: DefaultTabController(

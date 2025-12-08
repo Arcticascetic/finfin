@@ -30,11 +30,20 @@ class TransactionsNotifier extends ChangeNotifier {
             final t = Transaction.fromJson(map);
 
             // Save individually
-            await _box.put(t.id, json.encode(t.toJson()));
+            // await _box.put(t.id, json.encode(t.toJson())); // Optimized below
             _transactions.add(t);
+            // dirty = true; // Handled by bulk put below
           } catch (_) {
             // skip corrupted
           }
+        }
+
+        // Optimisation: Bulk write all migrated transactions
+        if (_transactions.isNotEmpty) {
+          final Map<String, String> batch = {
+            for (var t in _transactions) t.id: json.encode(t.toJson()),
+          };
+          await _box.putAll(batch);
         }
       }
       // Delete the legacy key
@@ -62,6 +71,18 @@ class TransactionsNotifier extends ChangeNotifier {
 
     _transactions.sort((a, b) => a.date.compareTo(b.date));
     notifyListeners();
+  }
+
+  /// Bulk add transactions (optimized)
+  Future<void> addTransactions(List<Transaction> txns) async {
+    _transactions.addAll(txns);
+    _transactions.sort((a, b) => a.date.compareTo(b.date));
+    notifyListeners();
+
+    final Map<String, String> batch = {
+      for (var t in txns) t.id: json.encode(t.toJson()),
+    };
+    await _box.putAll(batch);
   }
 
   Future<void> addTransaction(Transaction t) async {

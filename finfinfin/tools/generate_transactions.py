@@ -64,12 +64,19 @@ def generate_transaction(i, years_back=5):
     dt = random_date_within_years(years_back)
     # Add micro-variation using the loop index so iso timestamp is unique
     dt = dt.replace(microsecond=(i * 13) % 1000000)
+    # Make the timestamp explicit UTC (use Z) so other platforms parse it consistently.
+    try:
+        from datetime import timezone
+        aware = dt.replace(tzinfo=timezone.utc)
+        iso = aware.isoformat().replace('+00:00', 'Z')
+    except Exception:
+        iso = dt.isoformat()
 
     return {
         'amount': amount,
         'type': ttype,
         'category': category,
-        'date': dt.isoformat(),
+        'date': iso,
     }
 
 
