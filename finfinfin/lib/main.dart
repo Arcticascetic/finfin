@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart'; // For saving data
 import 'package:fl_chart/fl_chart.dart'; // For charts
 import 'package:intl/intl.dart'; // For date formatting
 import 'dart:io' show Platform, File;
-import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flex_color_scheme/flex_color_scheme.dart';
@@ -149,7 +149,7 @@ class _BudgetAppState extends State<BudgetApp> {
         final box = await Hive.openBox('transactions_box');
         // Create Notifier
         // --- RESET ON STARTUP (Requested) ---
-        await box.clear();
+        //await box.clear();
 
         _transactionsNotifier = TransactionsNotifier(box);
         _transactionsNotifier.addListener(() {
@@ -186,15 +186,19 @@ class _BudgetAppState extends State<BudgetApp> {
         setState(() {});
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text(
-              'Startup freeze detected. Database has been reset to recover.',
-            ),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            duration: const Duration(seconds: 10),
-          ),
-        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: const Text(
+                  'Startup freeze detected. Database has been reset to recover.',
+                ),
+                backgroundColor: Theme.of(context).colorScheme.error,
+                duration: const Duration(seconds: 10),
+              ),
+            );
+          }
+        });
       }
     } catch (e) {
       debugPrint('Initialization Error: $e');
@@ -2057,18 +2061,17 @@ class SettingsSheet extends StatelessWidget {
                                 label: const Text('Pick'),
                                 onPressed: () async {
                                   try {
-                                    final result = await FilePicker.platform
-                                        .pickFiles(
-                                          type: FileType.custom,
-                                          allowedExtensions: ['json'],
-                                        );
-                                    if (result != null &&
-                                        result.files.isNotEmpty) {
-                                      final fp = result.files.first;
-                                      final path = fp.path;
-                                      if (path != null) {
-                                        pathController.text = path;
-                                      }
+                                    const XTypeGroup typeGroup = XTypeGroup(
+                                      label: 'JSON Files',
+                                      extensions: <String>['json'],
+                                    );
+                                    final XFile? file = await openFile(
+                                      acceptedTypeGroups: <XTypeGroup>[
+                                        typeGroup,
+                                      ],
+                                    );
+                                    if (file != null) {
+                                      pathController.text = file.path;
                                     }
                                   } catch (e) {
                                     ScaffoldMessenger.of(context).showSnackBar(
