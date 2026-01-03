@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart'; // For saving data
 import 'package:fl_chart/fl_chart.dart'; // For charts
 import 'package:intl/intl.dart'; // For date formatting
 import 'dart:io' show Platform, File;
+import 'dart:typed_data'; // For Uint8List
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:hive_flutter/hive_flutter.dart';
@@ -87,6 +88,10 @@ class _BudgetAppState extends State<BudgetApp> {
   ThemeMode _themeMode = ThemeMode.light;
   DateTimeRange? _filterRange; // Null means 'All Time'
 
+  // ScaffoldMessenger Key for showing SnackBars from logic
+  final GlobalKey<ScaffoldMessengerState> _scaffoldMessengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
   // Dynamic Category State
   List<String> _expenseCategories = [];
   List<String> _incomeCategories = [];
@@ -123,6 +128,9 @@ class _BudgetAppState extends State<BudgetApp> {
 
   // --- Persistence & Initialization ---
 
+  // Track the current database path (null means default)
+  String? _currentDbPath;
+
   /// Loads settings (theme, currency) and data (categories, transactions).
   ///
   /// This method handles:
@@ -136,6 +144,7 @@ class _BudgetAppState extends State<BudgetApp> {
     // 1. Load Settings
     final savedCurrency = prefs.getString('currencySymbol');
     final isDarkMode = prefs.getBool('isDarkMode') ?? false;
+    _currentDbPath = prefs.getString('db_path'); // Load custom path
 
     // 2. Load Categories (use defaults if none saved)
     final expenseStrings = prefs.getStringList('expenseCategories');
@@ -146,7 +155,11 @@ class _BudgetAppState extends State<BudgetApp> {
     // 3. Init Hive and Transactions with Timeout Protection
     try {
       await Future(() async {
-        final box = await Hive.openBox('transactions_box');
+        // Use custom path if available, otherwise default
+        final box = await Hive.openBox(
+          'transactions_box',
+          path: _currentDbPath,
+        );
         // Create Notifier
         // --- RESET ON STARTUP (Requested) ---
         //await box.clear();
@@ -178,27 +191,62 @@ class _BudgetAppState extends State<BudgetApp> {
         await _transactionsNotifier.loadFromHive();
       }).timeout(const Duration(seconds: 60));
     } on TimeoutException {
-      // Emergency Reset: Delete box and retry
-      await Hive.deleteBoxFromDisk('transactions_box');
-      final box = await Hive.openBox('transactions_box');
-      _transactionsNotifier = TransactionsNotifier(box);
-      _transactionsNotifier.addListener(() {
-        setState(() {});
-      });
-      if (mounted) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: const Text(
-                  'Startup freeze detected. Database has been reset to recover.',
-                ),
-                backgroundColor: Theme.of(context).colorScheme.error,
-                duration: const Duration(seconds: 10),
+      // Emergency Reset: Ask user permission before deleting box
+      if (!mounted) return;
+      bool? shouldReset = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Database Timeout'),
+          content: const Text(
+            'The database is taking too long to open. This may indicate a lock or corruption.\n\n'
+            'Would you like to delete the database and start fresh? This will erase all data.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'Delete & Retry',
+                style: TextStyle(color: Colors.red),
               ),
-            );
-          }
+            ),
+          ],
+        ),
+      );
+
+      if (shouldReset == true) {
+        if (_currentDbPath != null) {
+          final file = File('$_currentDbPath/transactions_box.hive');
+          if (await file.exists()) await file.delete();
+          final lock = File('$_currentDbPath/transactions_box.lock');
+          if (await lock.exists()) await lock.delete();
+        } else {
+          await Hive.deleteBoxFromDisk('transactions_box');
+        }
+
+        final box = await Hive.openBox(
+          'transactions_box',
+          path: _currentDbPath,
+        );
+        _transactionsNotifier = TransactionsNotifier(box);
+        _transactionsNotifier.addListener(() {
+          setState(() {});
         });
+      } else {
+        // User cancelled, show error state
+        if (mounted) {
+          setState(() {
+            _hasError = true;
+            _errorMessage =
+                'Database initialization timed out and reset was cancelled.';
+            _isLoading = false;
+          });
+        }
+        return;
       }
     } catch (e) {
       debugPrint('Initialization Error: $e');
@@ -330,6 +378,7 @@ class _BudgetAppState extends State<BudgetApp> {
     const FlexScheme usedScheme = FlexScheme.bahamaBlue;
 
     return MaterialApp(
+      scaffoldMessengerKey: _scaffoldMessengerKey,
       title: 'Clickwheel Budget App',
       theme: FlexThemeData.light(
         scheme: usedScheme,
@@ -479,6 +528,15 @@ class _BudgetAppState extends State<BudgetApp> {
           onUpdateCategories: _updateCategories,
           onImportTransactions: (jsonString) =>
               _importTransactionsFromJsonString(ctx, jsonString),
+          currentDbPath: _currentDbPath,
+          onChangeDatabasePath: () async {
+            Navigator.pop(ctx);
+            _changeDatabaseLocation();
+          },
+          onExportData: (format) async {
+            Navigator.pop(ctx);
+            _exportData(format);
+          },
           onResetData: () async {
             Navigator.pop(ctx); // Close settings first
             _confirmAndResetData();
@@ -511,8 +569,9 @@ class _BudgetAppState extends State<BudgetApp> {
 
     if (confirmed == true) {
       await _transactionsNotifier.clearAllTransactions();
+      await _transactionsNotifier.clearAllTransactions();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        _scaffoldMessengerKey.currentState?.showSnackBar(
           const SnackBar(
             content: Text('All transactions have been erased.'),
             backgroundColor: Colors.red,
@@ -658,7 +717,9 @@ class _BudgetAppState extends State<BudgetApp> {
         );
       }
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx).showSnackBar(
+        // Use key as well for consistency although ctx might work here because it is from showDialog builder which is under the MaterialApp
+        // But safer to use key if ctx is from Dialog
+        _scaffoldMessengerKey.currentState?.showSnackBar(
           SnackBar(
             content: Text(
               'Imported $importedCount transactions (skipped $skippedCount).',
@@ -688,6 +749,174 @@ class _BudgetAppState extends State<BudgetApp> {
       }
     } finally {
       counts.dispose();
+    }
+  }
+
+  // --- Database Location & Export Logic ---
+
+  Future<void> _changeDatabaseLocation() async {
+    try {
+      final String? selectedDirectory = await getDirectoryPath();
+      if (selectedDirectory == null) return; // User canceled
+
+      // Confirm with user
+      if (!mounted) return;
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Change Database Location?'),
+          content: Text(
+            'This will move your database to:\n$selectedDirectory\n\n'
+            'The app will reload regardless of whether moving succeeds entirely. '
+            'Ensure you have write permissions.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Confirm'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirm != true) return;
+
+      setState(() {
+        _isLoading = true;
+      });
+
+      // 1. Get current paths
+      // If _currentDbPath is null, it's in default Hive location.
+      // We can't easily iterate default hive path from here without knowing it.
+      // But Hive.box('transactions_box').path gives the full path.
+      final Box box = Hive.box('transactions_box');
+      final String? oldPath = box.path;
+
+      // 2. Close box to release lock
+      await box.close();
+
+      if (oldPath != null) {
+        // 3. Move files
+        final File oldDbFile = File(oldPath);
+        final String filename = oldDbFile.uri.pathSegments.last;
+        if (await oldDbFile.exists()) {
+          try {
+            await oldDbFile.copy('$selectedDirectory/$filename');
+            // We can optionally delete the old one, but keeping it as backup is safer for now?
+            // Users might want "Move", but "Copy" is safer.
+            // Let's Copy.
+          } catch (e) {
+            // If copy fails, we haven't updated prefs yet, so we just restart and it reopens old one.
+            if (mounted) {
+              _scaffoldMessengerKey.currentState?.showSnackBar(
+                SnackBar(content: Text('Failed to copy database: $e')),
+              );
+            }
+            _loadSettingsAndData(); // Re-open old
+            return;
+          }
+        }
+      }
+
+      // 4. Update Prefs
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('db_path', selectedDirectory);
+
+      // 5. Reload
+      await _loadSettingsAndData();
+    } catch (e) {
+      if (mounted) {
+        _scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(content: Text('Error changing location: $e')),
+        );
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _exportData(String format) async {
+    try {
+      final transactions = _transactions; // Get current list
+      String content = '';
+      String mimeType = '';
+      String extension = '';
+
+      if (format == 'json') {
+        content = jsonEncode(transactions.map((e) => e.toJson()).toList());
+        mimeType = 'application/json';
+        extension = 'json';
+      } else if (format == 'csv') {
+        final buffer = StringBuffer();
+        // Header
+        buffer.writeln('Date,Amount,Type,Category,ID');
+        for (var t in transactions) {
+          // simple CSV escaping: quote fields if they contain commas
+          String escape(String s) {
+            if (s.contains(',')) return '"$s"';
+            return s;
+          }
+
+          buffer.write(
+            DateTime.parse(t.date.toIso8601String()).toLocal().toString(),
+          );
+          buffer.write(',');
+          buffer.write(t.amount);
+          buffer.write(',');
+          buffer.write(escape(t.type));
+          buffer.write(',');
+          buffer.write(escape(t.category));
+          buffer.write(',');
+          buffer.write(t.id);
+          buffer.writeln();
+        }
+        content = buffer.toString();
+        mimeType = 'text/csv';
+        extension = 'csv';
+      }
+
+      final fileName =
+          'transactions_export_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.$extension';
+
+      // Use file_selector to save
+      final FileSaveLocation? result = await getSaveLocation(
+        suggestedName: fileName,
+        acceptedTypeGroups: [
+          XTypeGroup(
+            label: format.toUpperCase(),
+            extensions: [extension],
+            mimeTypes: [mimeType],
+          ),
+        ],
+      );
+
+      if (result == null) {
+        // User canceled
+        return;
+      }
+
+      final Uint8List fileData = Uint8List.fromList(utf8.encode(content));
+      final XFile textFile = XFile.fromData(
+        fileData,
+        mimeType: mimeType,
+        name: fileName,
+      );
+      await textFile.saveTo(result.path);
+
+      if (mounted) {
+        _scaffoldMessengerKey.currentState?.showSnackBar(
+          const SnackBar(content: Text('Export successful')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        _scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
+      }
     }
   }
 }
@@ -1929,6 +2158,9 @@ class SettingsSheet extends StatelessWidget {
   final Function(String) onUpdateCurrency;
   final Function(String, List<String>) onUpdateCategories;
   final Function(String) onImportTransactions;
+  final String? currentDbPath;
+  final VoidCallback onChangeDatabasePath;
+  final Function(String) onExportData;
   final VoidCallback onResetData;
 
   const SettingsSheet({
@@ -1942,6 +2174,9 @@ class SettingsSheet extends StatelessWidget {
     required this.onUpdateCurrency,
     required this.onUpdateCategories,
     required this.onImportTransactions,
+    this.currentDbPath,
+    required this.onChangeDatabasePath,
+    required this.onExportData,
     required this.onResetData,
   });
 
@@ -2031,7 +2266,54 @@ class SettingsSheet extends StatelessWidget {
           const SizedBox(height: 20),
           ListTile(
             leading: const Icon(Icons.upload_file),
-            title: const Text('Import Transactions'),
+            title: const Text('Import from JSON'),
+            onTap: () async {
+              // ...
+            },
+          ),
+
+          const Divider(height: 30),
+
+          // --- Data Management Group ---
+          Text(
+            'Data Management',
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.folder_open),
+            title: const Text('Database Location'),
+            subtitle: Text(
+              currentDbPath ?? 'Default Storage',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: onChangeDatabasePath,
+          ),
+          ExpansionTile(
+            leading: const Icon(Icons.download),
+            title: const Text('Export Data'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.data_object),
+                title: const Text('Export as JSON'),
+                onTap: () => onExportData('json'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.table_chart),
+                title: const Text('Export as CSV'),
+                onTap: () => onExportData('csv'),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 20),
+          ListTile(
+            leading: const Icon(Icons.upload_file),
+            title: const Text('Import from JSON'),
             subtitle: const Text('Paste a JSON array or provide a file path'),
             onTap: () {
               final TextEditingController pathController =
@@ -2085,7 +2367,6 @@ class SettingsSheet extends StatelessWidget {
                             ],
                           ),
                           const SizedBox(height: 12),
-                          const SizedBox(height: 8),
                           const Text(
                             'Select a JSON file to import. The existing transactions will be replaced.',
                           ),
@@ -2138,20 +2419,56 @@ class SettingsSheet extends StatelessWidget {
               );
             },
           ),
-          const SizedBox(height: 20),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.delete_forever, color: Colors.red),
-            title: const Text(
-              'Reset Data',
-              style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+
+          const Divider(height: 30),
+
+          // --- Data Management Group ---
+          Text(
+            'Data Management',
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
             ),
-            subtitle: const Text(
-              'Erase all transactions. Categories and settings are kept.',
-            ),
-            onTap: onResetData,
           ),
+          ListTile(
+            leading: const Icon(Icons.folder_open),
+            title: const Text('Database Location'),
+            subtitle: Text(
+              currentDbPath ?? 'Default Storage',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: onChangeDatabasePath,
+          ),
+          ExpansionTile(
+            leading: const Icon(Icons.download),
+            title: const Text('Export Data'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.data_object),
+                title: const Text('Export as JSON'),
+                onTap: () => onExportData('json'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.table_chart),
+                title: const Text('Export as CSV'),
+                onTap: () => onExportData('csv'),
+              ),
+            ],
+          ),
+
           const SizedBox(height: 20),
+          Center(
+            child: TextButton.icon(
+              onPressed: onResetData,
+              icon: const Icon(Icons.delete_forever, color: Colors.red),
+              label: const Text(
+                'Reset All Data',
+                style: TextStyle(color: Colors.red),
+              ),
+            ),
+          ),
         ],
       ),
     );
