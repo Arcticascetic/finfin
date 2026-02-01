@@ -23,11 +23,14 @@ class TransactionsNotifier extends ChangeNotifier {
   // Lazy Loading State
   final Set<String> _availableMonths = {};
   final Set<String> _loadedMonths = {};
+  final Map<String, MonthSummary> _monthSummaries = {};
   double _totalBalance = 0.0;
 
   double get totalBalance => _totalBalance;
   Set<String> get availableMonths => _availableMonths;
   Set<String> get loadedMonths => _loadedMonths;
+  Map<String, MonthSummary> get monthSummaries =>
+      Map.unmodifiable(_monthSummaries);
 
   List<Transaction> get transactions => List.unmodifiable(_transactions);
 
@@ -38,6 +41,7 @@ class TransactionsNotifier extends ChangeNotifier {
     _transactions.clear();
     _availableMonths.clear();
     _loadedMonths.clear();
+    _monthSummaries.clear();
     _totalBalance = 0.0;
 
     // 1. Scan keys to build available months and detect legacy keys
@@ -53,6 +57,16 @@ class TransactionsNotifier extends ChangeNotifier {
         continue;
       }
       if (key is String) {
+        if (key.startsWith('summary_')) {
+          final yyyyMM = key.substring(8);
+          try {
+            _monthSummaries[yyyyMM] = MonthSummary.fromJson(
+              json.decode(_box.get(key)),
+            );
+          } catch (_) {}
+          continue;
+        }
+
         // Check format: YYYYMM-UUID
         if (RegExp(r'^\d{6}-').hasMatch(key)) {
           final yyyyMM = key.substring(0, 6);
@@ -61,6 +75,13 @@ class TransactionsNotifier extends ChangeNotifier {
           // Assume legacy UUID-only key
           legacyKeys.add(key);
         }
+      }
+    }
+
+    // Backfill missing summaries (first run with this feature)
+    for (var m in _availableMonths) {
+      if (!_monthSummaries.containsKey(m)) {
+        await _calculateAndSaveSummary(m);
       }
     }
 
@@ -98,6 +119,12 @@ class TransactionsNotifier extends ChangeNotifier {
       await _box.putAll(batch);
       await _box.deleteAll(legacyKeys); // Remove old keys
       await _box.put('total_balance', _totalBalance); // Save balance
+
+      // Recalculate summaries for migrated data
+      _monthSummaries.clear();
+      for (var m in _availableMonths) {
+        await _calculateAndSaveSummary(m);
+      }
     }
 
     if (!balanceLoaded) {
@@ -160,6 +187,59 @@ class TransactionsNotifier extends ChangeNotifier {
     return '$yyyyMM-${t.id}';
   }
 
+  Future<void> _calculateAndSaveSummary(String yyyyMM) async {
+    double income = 0;
+    double expense = 0;
+
+    // We have to iterate keys to find transactions for this month
+    // This is same logic as loadMonth but we only sum amounts
+    final keys = _box.keys.where(
+      (k) => k is String && k.startsWith('$yyyyMM-'),
+    );
+    for (var k in keys) {
+      final val = _box.get(k);
+      if (val is String) {
+        try {
+          final map = json.decode(val);
+          // Optimization: Don't fully inflate Transaction if possible, just read fields
+          // But Transaction.fromJson is safe.
+          final t = Transaction.fromJson(map);
+          if (t.type == 'income') {
+            income += t.amount;
+          } else {
+            expense += t.amount;
+          }
+        } catch (_) {}
+      }
+    }
+
+    final summary = MonthSummary(income: income, expense: expense);
+    _monthSummaries[yyyyMM] = summary;
+    await _box.put('summary_$yyyyMM', json.encode(summary.toJson()));
+  }
+
+  void _updateMonthSummary(
+    String yyyyMM,
+    double amount,
+    String type, {
+    bool isRemoval = false,
+  }) {
+    final current =
+        _monthSummaries[yyyyMM] ?? MonthSummary(income: 0, expense: 0);
+    double inc = current.income;
+    double exp = current.expense;
+
+    if (type == 'income') {
+      inc = isRemoval ? inc - amount : inc + amount;
+    } else {
+      exp = isRemoval ? exp - amount : exp + amount;
+    }
+
+    final newSummary = MonthSummary(income: inc, expense: exp);
+    _monthSummaries[yyyyMM] = newSummary;
+    _box.put('summary_$yyyyMM', json.encode(newSummary.toJson()));
+  }
+
   /// Bulk add transactions (optimized)
   Future<void> addTransactions(List<Transaction> txns) async {
     _transactions.addAll(txns);
@@ -177,6 +257,14 @@ class TransactionsNotifier extends ChangeNotifier {
       _loadedMonths.add(yyyyMM); // We just loaded/added it
 
       _totalBalance += (t.type == 'income' ? t.amount : -t.amount);
+
+      // Update summary memory (batched save later?)
+      // ideally we batch keys.
+      // For simplicity, let's just aggregate in memory then save summaries at end of loop.
+      // But _updateMonthSummary writes to box.
+      // Let's do a bulk update logic inline for performance
+      // Or just call _updateMonthSummary. It puts to box which is sync-ish for put.
+      _updateMonthSummary(key.substring(0, 6), t.amount, t.type);
     }
 
     notifyListeners();
@@ -194,6 +282,8 @@ class TransactionsNotifier extends ChangeNotifier {
     _loadedMonths.add(yyyyMM); // Implicitly loaded since we just added it
 
     _totalBalance += (t.type == 'income' ? t.amount : -t.amount);
+
+    _updateMonthSummary(yyyyMM, t.amount, t.type);
 
     notifyListeners();
     await _box.put(key, json.encode(t.toJson()));
@@ -226,11 +316,13 @@ class TransactionsNotifier extends ChangeNotifier {
       // Safe fallback: check if UUID exists as plain key
       if (_box.containsKey(t.id)) {
         await _box.delete(t.id);
-      } else {
-        // Scan for ID? Expensive but safe.
-        // Let's assume consistent key for now.
       }
     }
+
+    // Update summary
+    final yyyyMM = _generateKey(t).substring(0, 6);
+    _updateMonthSummary(yyyyMM, t.amount, t.type, isRemoval: true);
+
     await _box.put('total_balance', _totalBalance);
   }
 
@@ -267,6 +359,12 @@ class TransactionsNotifier extends ChangeNotifier {
     final yyyyMM = newKey.substring(0, 6);
     _availableMonths.add(yyyyMM);
     _loadedMonths.add(yyyyMM);
+
+    // Update summaries
+    final oldYM = oldKey.substring(0, 6);
+    _updateMonthSummary(oldYM, oldTxn.amount, oldTxn.type, isRemoval: true);
+
+    _updateMonthSummary(yyyyMM, newTxn.amount, newTxn.type);
   }
 
   /// Bulk import. Replaces current data.
@@ -278,6 +376,7 @@ class TransactionsNotifier extends ChangeNotifier {
     // Clear current data first
     await _box.clear();
     _transactions = [];
+    _monthSummaries.clear();
 
     // Temporary list to hold parsed items
     final List<Transaction> parsed = [];
@@ -306,6 +405,7 @@ class TransactionsNotifier extends ChangeNotifier {
         counts.value = {
           ...counts.value,
           'processed': processed,
+          'imported': imported,
           'skipped': skipped,
         };
         continue;
@@ -318,7 +418,6 @@ class TransactionsNotifier extends ChangeNotifier {
       imported++;
       processed++;
 
-      // Batch update UI
       if (processed % 50 == 0) {
         counts.value = {
           ...counts.value,
@@ -328,6 +427,10 @@ class TransactionsNotifier extends ChangeNotifier {
         };
         await Future<void>.delayed(Duration.zero);
       }
+
+      // Update summary for item
+      final key = _generateKey(t);
+      _updateMonthSummary(key.substring(0, 6), t.amount, t.type);
     }
 
     _transactions = parsed;
@@ -340,6 +443,7 @@ class TransactionsNotifier extends ChangeNotifier {
     _transactions.clear();
     _availableMonths.clear();
     _loadedMonths.clear();
+    _monthSummaries.clear(); // Clear summaries
     _totalBalance = 0.0;
 
     notifyListeners();
@@ -348,5 +452,23 @@ class TransactionsNotifier extends ChangeNotifier {
     await _box.clear();
     // Re-initialize metadata
     await _box.put('total_balance', 0.0);
+  }
+}
+
+class MonthSummary {
+  final double income;
+  final double expense;
+
+  MonthSummary({required this.income, required this.expense});
+
+  double get net => income - expense;
+
+  Map<String, dynamic> toJson() => {'income': income, 'expense': expense};
+
+  factory MonthSummary.fromJson(Map<String, dynamic> json) {
+    return MonthSummary(
+      income: (json['income'] as num).toDouble(),
+      expense: (json['expense'] as num).toDouble(),
+    );
   }
 }
