@@ -3205,25 +3205,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     });
   }
 
-  /// Commits the current digit and moves to the next position.
-  /// If at the end of the list, appends a new digit.
-  void _addDigit() {
-    setState(() {
-      if (_currentIndex < _inputDigits.length) {
-        _inputDigits[_currentIndex] = _currentDigit;
-        _ensureFlashFlagsLength();
-        _triggerFlash(_currentIndex);
-      } else {
-        _inputDigits.add(_currentDigit);
-        _ensureFlashFlagsLength();
-        _triggerFlash(_inputDigits.length - 1);
-      }
-      _currentIndex = _currentIndex + 1;
-      if (_currentIndex >= _inputDigits.length) _inputDigits.add(0);
-      _currentDigit = _inputDigits[_currentIndex];
-      _updateCurrentValue();
-    });
-  }
 
   /// Removes the last digit or resets the current one if it's the only one.
   /// Handles navigation back to the previous digit if applicable.
@@ -3337,8 +3318,9 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                         _triggerFlash(_inputDigits.length - 1);
                       }
                       _currentIndex = _currentIndex + 1;
-                      if (_currentIndex >= _inputDigits.length)
+                      if (_currentIndex >= _inputDigits.length) {
                         _inputDigits.add(0);
+                      }
                       _currentDigit = _inputDigits[_currentIndex];
                     } else if (vx > 100) {
                       // Swipe Right -> Previous Digit
