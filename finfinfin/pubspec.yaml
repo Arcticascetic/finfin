@@ -36,7 +36,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   intl: ^0.18.0
   fl_chart: ^1.1.1
-  # file_picker: ^5.2.6 # Removed due to Linux dependency issues (zenity/qarma)
+  file_picker: ^5.2.6
+  # Keep `file_selector` as a runtime fallback on platforms where
+  # the native file picker may be unavailable or problematic.
   file_selector: ^1.0.3
   hive: ^2.2.3
   hive_flutter: ^1.1.0

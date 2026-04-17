@@ -158,8 +158,6 @@ class _BudgetAppState extends State<BudgetApp> {
     final incomeStrings = prefs.getStringList('incomeCategories');
 
     // 3. Load Transactions
-    // 3. Init Hive and Transactions
-    // 3. Init Hive and Transactions with Timeout Protection
     try {
       await Future(() async {
         // Use custom path if available, otherwise default
@@ -168,9 +166,6 @@ class _BudgetAppState extends State<BudgetApp> {
           path: _currentDbPath,
         );
         // Create Notifier
-        // --- RESET ON STARTUP (Requested) ---
-        //await box.clear();
-
         _transactionsNotifier = TransactionsNotifier(box);
         _transactionsNotifier.addListener(() {
           setState(() {});
@@ -196,6 +191,14 @@ class _BudgetAppState extends State<BudgetApp> {
         }
 
         await _transactionsNotifier.loadFromHive();
+
+        // --- Set Default Filter to Last 30 Days ---
+        final now = DateTime.now();
+        final start = now.subtract(const Duration(days: 30));
+        _filterRange = DateTimeRange(start: start, end: now);
+
+        // Ensure data for this range is loaded
+        await _loadDataForRange(_filterRange!);
       }).timeout(const Duration(seconds: 60));
     } on TimeoutException {
       // Emergency Reset: Ask user permission before deleting box
@@ -247,7 +250,6 @@ class _BudgetAppState extends State<BudgetApp> {
         // User cancelled, show error state
         if (mounted) {
           setState(() {
-            _hasError = true;
             _errorMessage =
                 'Database initialization timed out and reset was cancelled.';
             _isLoading = false;
@@ -266,6 +268,8 @@ class _BudgetAppState extends State<BudgetApp> {
       }
       return; // Stop execution here
     }
+
+    if (!mounted) return;
 
     setState(() {
       _currencySymbol = savedCurrency ?? '\$';
@@ -372,20 +376,24 @@ class _BudgetAppState extends State<BudgetApp> {
 
     // Auto-load transactions for the selected range
     if (newRange != null) {
-      DateTime monthIterator = DateTime(
-        newRange.start.year,
-        newRange.start.month,
-      );
-      final endMonth = DateTime(newRange.end.year, newRange.end.month);
+      _loadDataForRange(newRange);
+    }
+  }
 
-      while (monthIterator.isBefore(endMonth) ||
-          monthIterator.isAtSameMomentAs(endMonth)) {
-        final yyyyMM = DateFormat('yyyyMM').format(monthIterator);
-        _transactionsNotifier.loadMonth(yyyyMM);
+  /// Ensures transactions for all months within the given range are loaded.
+  Future<void> _loadDataForRange(DateTimeRange range) async {
+    DateTime monthIterator = DateTime(range.start.year, range.start.month);
+    final endMonth = DateTime(range.end.year, range.end.month);
 
-        // Move to next month
-        monthIterator = DateTime(monthIterator.year, monthIterator.month + 1);
+    while (monthIterator.isBefore(endMonth) ||
+        monthIterator.isAtSameMomentAs(endMonth)) {
+      final yyyyMM = DateFormat('yyyyMM').format(monthIterator);
+      if (!_transactionsNotifier.loadedMonths.contains(yyyyMM)) {
+        await _transactionsNotifier.loadMonth(yyyyMM);
       }
+
+      // Move to next month
+      monthIterator = DateTime(monthIterator.year, monthIterator.month + 1);
     }
   }
 
@@ -992,12 +1000,14 @@ class CategorySelectionScreen extends StatelessWidget {
   final String type; // 'income' or 'expense'
   final List<String> categories;
   final Function(double, String, String) onConfirmTransaction;
+  final String inputMethod;
 
   const CategorySelectionScreen({
     super.key,
     required this.type,
     required this.categories,
     required this.onConfirmTransaction,
+    required this.inputMethod,
   });
 
   @override
@@ -1026,20 +1036,54 @@ class CategorySelectionScreen extends StatelessWidget {
                 final category = categories[index];
                 return ElevatedButton(
                   onPressed: () async {
-                    // Navigate to ClickwheelInputScreen after selection
-                    final amount = await Navigator.of(context).push<double>(
-                      MaterialPageRoute(
-                        builder: (ctx) => ClickwheelInputScreen(
-                          title: 'Enter Amount for $category',
+                    if (inputMethod == 'clickwheel') {
+                      // Navigate to ClickwheelInputScreen after selection
+                      final amount = await Navigator.of(context).push<double>(
+                        MaterialPageRoute(
+                          builder: (ctx) => ClickwheelInputScreen(
+                            title: 'Enter Amount for $category',
+                          ),
                         ),
-                      ),
-                    );
+                      );
 
-                    if (amount != null && amount > 0) {
-                      onConfirmTransaction(amount, type, category);
+                      if (amount != null && amount > 0) {
+                        onConfirmTransaction(amount, type, category);
+                      }
+                      // Pop back to the main screen after input is done
+                      if (context.mounted) Navigator.of(context).pop();
+                    } else {
+                      // Keyboard Input: Use TransactionEditorScreen
+                      final dummyTx = Transaction(
+                        amount: 0,
+                        type: type,
+                        category: category,
+                        date: DateTime.now(),
+                      );
+                      final result = await Navigator.of(context)
+                          .push<Transaction>(
+                            MaterialPageRoute(
+                              fullscreenDialog: true,
+                              builder: (ctx) => TransactionEditorScreen(
+                                initial: dummyTx,
+                                expenseCategories: type == 'expense'
+                                    ? categories
+                                    : [],
+                                incomeCategories: type == 'income'
+                                    ? categories
+                                    : [],
+                              ),
+                            ),
+                          );
+
+                      if (result != null) {
+                        onConfirmTransaction(
+                          result.amount,
+                          result.type,
+                          result.category,
+                        );
+                        if (context.mounted) Navigator.of(context).pop();
+                      }
                     }
-                    // Pop back to the main screen after input is done
-                    if (context.mounted) Navigator.of(context).pop();
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Theme.of(
@@ -1206,10 +1250,8 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       if (confirm == true) widget.onRemoveTransaction(transaction);
     } else if (selected == 'edit') {
-      final bool isDesktop =
-          !kIsWeb &&
-          (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
-      if (isDesktop) {
+      final bool useKeyboard = widget.inputMethod == 'keyboard';
+      if (useKeyboard) {
         final edited = await Navigator.of(ctx).push<Transaction>(
           MaterialPageRoute(
             fullscreenDialog: true,
@@ -1629,6 +1671,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           type: 'income',
                           categories: widget.incomeCategories,
                           onConfirmTransaction: widget.onAddTransaction,
+                          inputMethod: widget.inputMethod,
                         ),
                       ),
                     );
@@ -1652,6 +1695,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           type: 'expense',
                           categories: widget.expenseCategories,
                           onConfirmTransaction: widget.onAddTransaction,
+                          inputMethod: widget.inputMethod,
                         ),
                       ),
                     );
@@ -3121,7 +3165,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
   final List<int> _inputDigits = [0, 0, 0]; // start from 100s digit by default
   int _currentIndex =
       0; // 0 => 100s, 1 => 10s, 2 => 1s, then additional lower digits if appended
-  Timer? _digitConfirmationTimer;
   double _currentValue = 0.0;
   // Flash flags for a subtle animation when a digit changes
   List<bool> _flashFlags = [];
@@ -3132,13 +3175,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     if (_currentIndex < _inputDigits.length) {
       _currentDigit = _inputDigits[_currentIndex];
     }
-    _startDigitConfirmationTimer();
-  }
-
-  @override
-  void dispose() {
-    _digitConfirmationTimer?.cancel();
-    super.dispose();
   }
 
   /// Increments the current digit, wrapping around 0-9.
@@ -3152,7 +3188,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
         _triggerFlash(_currentIndex);
       }
       _updateCurrentValue();
-      _resetDigitConfirmationTimer();
     });
   }
 
@@ -3167,7 +3202,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
         _triggerFlash(_currentIndex);
       }
       _updateCurrentValue();
-      _resetDigitConfirmationTimer();
     });
   }
 
@@ -3188,7 +3222,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
       if (_currentIndex >= _inputDigits.length) _inputDigits.add(0);
       _currentDigit = _inputDigits[_currentIndex];
       _updateCurrentValue();
-      _resetDigitConfirmationTimer();
     });
   }
 
@@ -3212,10 +3245,8 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
           _triggerFlash(_currentIndex);
         }
         _updateCurrentValue();
-        _resetDigitConfirmationTimer();
       } else {
         _currentDigit = 0;
-        _resetDigitConfirmationTimer();
       }
     });
   }
@@ -3251,17 +3282,6 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
     final numStr = _inputDigits.map((e) => e.toString()).join();
     _currentValue = (int.tryParse(numStr) ?? 0) / 100.0;
   }
-
-  /// Starts the timer that auto-confirms the digit after a delay.
-  void _startDigitConfirmationTimer() {
-    _digitConfirmationTimer?.cancel();
-    _digitConfirmationTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) _addDigit();
-    });
-  }
-
-  /// Resets the auto-confirmation timer.
-  void _resetDigitConfirmationTimer() => _startDigitConfirmationTimer();
 
   @override
   Widget build(BuildContext context) {
@@ -3305,15 +3325,33 @@ class _ClickwheelInputScreenState extends State<ClickwheelInputScreen> {
                 onHorizontalDragEnd: (details) {
                   final vx = details.velocity.pixelsPerSecond.dx;
                   setState(() {
-                    if (vx > 100) {
-                      _currentIndex = _currentIndex + 1;
-                      if (_currentIndex >= _inputDigits.length) {
-                        _inputDigits.add(0);
+                    if (vx < -100) {
+                      // Swipe Left -> Next Digit
+                      if (_currentIndex < _inputDigits.length) {
+                        _inputDigits[_currentIndex] = _currentDigit;
+                        _ensureFlashFlagsLength();
+                        _triggerFlash(_currentIndex);
+                      } else {
+                        _inputDigits.add(_currentDigit);
+                        _ensureFlashFlagsLength();
+                        _triggerFlash(_inputDigits.length - 1);
                       }
+                      _currentIndex = _currentIndex + 1;
+                      if (_currentIndex >= _inputDigits.length)
+                        _inputDigits.add(0);
                       _currentDigit = _inputDigits[_currentIndex];
-                    } else if (vx < -100) {
-                      if (_currentIndex > 0) _currentIndex = _currentIndex - 1;
-                      _currentDigit = _inputDigits[_currentIndex];
+                    } else if (vx > 100) {
+                      // Swipe Right -> Previous Digit
+                      if (_currentIndex > 0) {
+                        // Save current before leaving?
+                        if (_currentIndex < _inputDigits.length) {
+                          _inputDigits[_currentIndex] = _currentDigit;
+                        }
+                        _currentIndex = _currentIndex - 1;
+                        _currentDigit = _inputDigits[_currentIndex];
+                        _ensureFlashFlagsLength();
+                        _triggerFlash(_currentIndex);
+                      }
                     }
                     _updateCurrentValue();
                   });
