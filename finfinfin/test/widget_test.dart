@@ -13,7 +13,7 @@ import 'package:finfinfin/logic.dart';
 void main() {
   testWidgets('Counter increments smoke test', (WidgetTester tester) async {
   // Build the real app (BudgetApp) so tests see the same widget tree as runtime.
-  await tester.pumpWidget(const BudgetApp(logic: AppLogic()));
+  await tester.pumpWidget(BudgetApp(logic: AppLogic()));
   await tester.pumpAndSettle();
 
   // The app's AppBar title should be present.

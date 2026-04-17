@@ -1,24 +1,13 @@
 import 'package:flutter/material.dart';
-import 'dart:async'; // For Timer
+import 'dart:async'; // For TimeoutException
 import 'dart:convert'; // For JSON encoding/decoding
-import 'package:shared_preferences/shared_preferences.dart'; // For saving data
-import 'package:fl_chart/fl_chart.dart'; // For charts
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart'; // For date formatting
 import 'dart:io' show Platform, File;
 import 'dart:typed_data'; // For Uint8List
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:flex_color_scheme/flex_color_scheme.dart';
-// ----------------------------------------------------------------------
-// Main Entry Point & App Shell
-// ----------------------------------------------------------------------
-
-import 'models/transaction.dart';
-import 'models/transactions_notifier.dart';
-
-/// The entry point for the application.
-/// Initializes bindings, Hive, and runs the root [BudgetApp].
 
 import 'models/transaction.dart';
 import 'models/transactions_notifier.dart';
@@ -432,12 +421,7 @@ class AppLogic extends ChangeNotifier {
     }).toList();
   }
 
-  // --- Build Method ---
-  @override
-  /// Builds the main wid
-
   // --- Settings Modal Bottom Sheet ---
-  /// Di
 
   /// Shows a confirmation dialog and resets all transaction data if confirmed.
   Future<void> confirmAndResetData(BuildContext context) async {

@@ -1,24 +1,9 @@
 import 'package:flutter/material.dart';
-import 'dart:async'; // For Timer
-import 'dart:convert'; // For JSON encoding/decoding
-import 'package:shared_preferences/shared_preferences.dart'; // For saving data
 import 'package:fl_chart/fl_chart.dart'; // For charts
 import 'package:intl/intl.dart'; // For date formatting
-import 'dart:io' show Platform, File;
-import 'dart:typed_data'; // For Uint8List
+import 'dart:io' show File;
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flex_color_scheme/flex_color_scheme.dart';
-// ----------------------------------------------------------------------
-// Main Entry Point & App Shell
-// ----------------------------------------------------------------------
-
-import 'models/transaction.dart';
-import 'models/transactions_notifier.dart';
-
-/// The entry point for the application.
-/// Initializes bindings, Hive, and runs the root [BudgetApp].
 
 import 'logic.dart';
 import 'models/transaction.dart';
@@ -2205,6 +2190,24 @@ class _CategoryEditorState extends State<CategoryEditor> {
                           style: const TextStyle(fontSize: 16),
                         ),
                       ),
+                      // Set Limit button (expense categories only)
+                      if (widget.type == 'expense' && widget.onUpdateLimits != null)
+                        TextButton(
+                          onPressed: () => _setLimit(context, category),
+                          child: Text(
+                            _expenseCategoryLimits.containsKey(category) &&
+                                    _expenseCategoryLimits[category]! > 0
+                                ? 'Limit: ${_expenseCategoryLimits[category]!.toStringAsFixed(2)}'
+                                : 'Set Limit',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: _expenseCategoryLimits.containsKey(category) &&
+                                      _expenseCategoryLimits[category]! > 0
+                                  ? Colors.orange
+                                  : null,
+                            ),
+                          ),
+                        ),
                       // Remove button
                       IconButton(
                         icon: const Icon(
